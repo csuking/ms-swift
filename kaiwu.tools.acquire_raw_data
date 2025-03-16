@@ -1,0 +1,148 @@
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:156] [1;36mExecutor: system_prompt=You are a emboided agent, your name is kaiwu.[0m
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:201] [1;36mExecutor: system_prompt=You are a emboided agent, your name is kaiwu.
+
+###输出格式###
+<answer-to-user> # 优先言简意赅地回复用户
+Action: {"arguments": <args-dict-1>, "name": <function-name-1>}
+... # (你可以同时调用多个工具以提高任务并行性)
+Action: {"arguments": <args-dict-n>, "name": <function-name-n>}
+Observation:{"name": <function-name-1>, "content": <result-dict-1>}...
+Observation:{"name": <function-name-n>, "content": <result-dict-n>}
+... (this answer/Action/Observation can be repeated zero or more times until the task is completed)
+
+###可用工具###
+[{"type": "function", "function": {"name": "perception", "description": "Obtain images to perceive and understand the environment.", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "robotic_arm_operation", "description": "Control the robotic arm to complete the operation task.", "parameters": {"type": "object", "properties": {"instruction": {"description": "Generate only one simple operation instruction in English for robotic arms to complete a specific task.\nA instruction should consist of:\n1. Action: Use action verbs like wipe and open to describe each step.\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\n3. Action Mode: using the left arm or right arm, not supporting both arms.\nExamples 1: Grip the bottle using the left arm.\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\nExamples 3: Place the bottle in the center of the table using the right arm.", "title": "Instruction", "type": "string"}}, "required": ["instruction"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "google_search", "description": "联网搜索工具：用于在博查AI平台搜索信息。", "parameters": {"type": "object", "properties": {"query": {"description": "用户提出的问题或者搜索关键词。", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_time", "description": "用于获取当前时间", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_weather", "description": "即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度", "parameters": {"type": "object", "properties": {"query": {"description": "中文的区域名称", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}]
+
+###辅助信息###
+当前你处于中国北京市通州区。
+现在的时间是2025-03-16 11:23:45, 周天。
+现在开始！
+[0m
+[DEBUG:/root/kaiwu/kaiwu/configs/robot_mcts.py:79] 是否使用文本世界模型: False
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:156] [1;36mDreamer: system_prompt=You are a emboided agent, your name is kaiwu.
+
+###输出格式###
+<answer-to-user> # 优先言简意赅地回复用户
+Action: {"arguments": <args-dict-1>, "name": <function-name-1>}
+... # (你可以同时调用多个工具以提高任务并行性)
+Action: {"arguments": <args-dict-n>, "name": <function-name-n>}
+Observation:{"name": <function-name-1>, "content": <result-dict-1>}...
+Observation:{"name": <function-name-n>, "content": <result-dict-n>}
+... (this answer/Action/Observation can be repeated zero or more times until the task is completed)
+
+###可用工具###
+[{"type": "function", "function": {"name": "perception", "description": "Obtain images to perceive and understand the environment.", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "robotic_arm_operation", "description": "Control the robotic arm to complete the operation task.", "parameters": {"type": "object", "properties": {"instruction": {"description": "Generate only one simple operation instruction in English for robotic arms to complete a specific task.\nA instruction should consist of:\n1. Action: Use action verbs like wipe and open to describe each step.\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\n3. Action Mode: using the left arm or right arm, not supporting both arms.\nExamples 1: Grip the bottle using the left arm.\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\nExamples 3: Place the bottle in the center of the table using the right arm.", "title": "Instruction", "type": "string"}}, "required": ["instruction"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "google_search", "description": "联网搜索工具：用于在博查AI平台搜索信息。", "parameters": {"type": "object", "properties": {"query": {"description": "用户提出的问题或者搜索关键词。", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_time", "description": "用于获取当前时间", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_weather", "description": "即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度", "parameters": {"type": "object", "properties": {"query": {"description": "中文的区域名称", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}]
+
+###辅助信息###
+当前你处于中国北京市通州区。
+现在的时间是2025-03-16 11:23:45, 周天。
+现在开始！
+[0m
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:156] [1;36mActor: system_prompt=You are a emboided agent, your name is kaiwu.你当前的任务是结合图片信息，为完成用户的指令，想出三种不同的下一步动作，同时描述观察到的图片信息。## Follow the response format below in JSON
+```{
+    "thought": "<string>", // 深呼吸，然后充分思考。
+    "proposed_actions": "<list[Action]>", // 三种不同的下一步动作。Action的格式为{"arguments": <args-dict>, "name": <function-name>}。
+}```
+
+###可用工具###
+[{"type": "function", "function": {"name": "perception", "description": "Obtain images to perceive and understand the environment.", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "robotic_arm_operation", "description": "Control the robotic arm to complete the operation task.", "parameters": {"type": "object", "properties": {"instruction": {"description": "Generate only one simple operation instruction in English for robotic arms to complete a specific task.\nA instruction should consist of:\n1. Action: Use action verbs like wipe and open to describe each step.\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\n3. Action Mode: using the left arm or right arm, not supporting both arms.\nExamples 1: Grip the bottle using the left arm.\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\nExamples 3: Place the bottle in the center of the table using the right arm.", "title": "Instruction", "type": "string"}}, "required": ["instruction"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "google_search", "description": "联网搜索工具：用于在博查AI平台搜索信息。", "parameters": {"type": "object", "properties": {"query": {"description": "用户提出的问题或者搜索关键词。", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_time", "description": "用于获取当前时间", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_weather", "description": "即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度", "parameters": {"type": "object", "properties": {"query": {"description": "中文的区域名称", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}]
+
+###辅助信息###
+当前你处于中国北京市通州区。
+现在的时间是2025-03-16 11:23:45, 周天。
+现在开始！
+[0m
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:156] [1;36mCritic: system_prompt=You are a emboided agent, your name is kaiwu.你当前的任务是从不同的下一步动作中挑选出最好的一个动作。## Follow the response format below in JSON
+```
+{
+    "consideration": "<string>", // 深呼吸，然后充分思考。
+    "best_action_index": "<int>", // 最好动作的序号，从0开始。
+}
+```
+
+###可用工具###
+[{"type": "function", "function": {"name": "perception", "description": "Obtain images to perceive and understand the environment.", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "robotic_arm_operation", "description": "Control the robotic arm to complete the operation task.", "parameters": {"type": "object", "properties": {"instruction": {"description": "Generate only one simple operation instruction in English for robotic arms to complete a specific task.\nA instruction should consist of:\n1. Action: Use action verbs like wipe and open to describe each step.\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\n3. Action Mode: using the left arm or right arm, not supporting both arms.\nExamples 1: Grip the bottle using the left arm.\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\nExamples 3: Place the bottle in the center of the table using the right arm.", "title": "Instruction", "type": "string"}}, "required": ["instruction"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "google_search", "description": "联网搜索工具：用于在博查AI平台搜索信息。", "parameters": {"type": "object", "properties": {"query": {"description": "用户提出的问题或者搜索关键词。", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_time", "description": "用于获取当前时间", "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}}, {"type": "function", "function": {"name": "get_weather", "description": "即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度", "parameters": {"type": "object", "properties": {"query": {"description": "中文的区域名称", "title": "Query", "type": "string"}}, "required": ["query"], "additionalProperties": false}}}]
+
+###辅助信息###
+当前你处于中国北京市通州区。
+现在的时间是2025-03-16 11:23:45, 周天。
+现在开始！
+[0m
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:156] [1;36mScore: system_prompt=你是一个具身智能场景下的任务评估专家。
+你的任务是根据用户指令和具身智能体的行为，评估其任务执行状态，最后严格按照格式输出。## Follow the response format below in JSON
+```
+{
+    "reflection": "<string>", // 深呼吸，然后谨慎地反思。
+    "state": "<string>", //当前具身智能体的执行状态，必须从[success、continue、failure]中取值。
+}
+```[0m
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:257]   初始化 MCTS 树，关键信息如下：
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:258]   是否输出每次迭代轨迹：True
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:259]   探索权重 (w_exp)：1.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:260]   树的深度限制：6
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:261]   迭代次数：2
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:262]   累积奖励计算方法：sum
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:263]   Q 值计算方法：mean
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:264]   模拟策略：max
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:265]   输出策略：max_reward
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:266]   是否使用 fast_reward：True
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:267]   是否禁用 tqdm：True
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:270]   节点可视化函数：<lambda>
+[INFO:/root/kaiwu/kaiwu/configs/robot_mcts.py:137] [INFO] 机器人MCTS初始化完成
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:480] 用户首条指令: 把苹果放到蓝色盘子里
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:481] 机器人初识状态图片路径: assets/data/kling/franka/pick_up_the_apple/first_frame.jpg
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:67] 初始observation: images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'] video=None description=None
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:53] 开始初始化 MCTSNode, state=memory=Memory(history=[{'role': 'user', 'content': '把苹果放到蓝色盘子里'}], current_stage=<Stage.ACTOR: 'actor'>, thought=None, proposed_actions=None, consideration=None, best_action_index=None, observation=Observation(images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'], video=None, description=None), reflection=None, state=<State.CONTINUE: 'continue'>) status=<RobotStatus.Available: 'Available'> task='把苹果放到蓝色盘子里' hands_status=[{'hand': 'left', 'status': 'idle'}, {'hand': 'right', 'status': 'idle'}] skill_status=[] plan=[] images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'] video=None observation=Observation(images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'], video=None, description=None), action=None, parent=None 
+
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:57] 分配节点ID: 0
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:62] 未提供 fast_reward_details, 初始化为空字典
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:69] 设置 fast_reward 和 reward 为: 0.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:73] 保存 fast_reward_details: {}
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:77] 设置 is_terminal 为: False
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:89] 设置 calc_q 函数为: mean
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:94] 初始化访问次数 N=0, 累计奖励 Q=0.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:99] 节点为根节点, 设置 depth=0
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:441] 开始第 0 次迭代
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:304] [DEBUG]当前节点id: 0
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:307] [DEBUG]当前节点的孩子: None
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:304] [1;36mActor: message=ChatCompletionMessage(content='```', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], reasoning_content=None), cost=260.5ms[0m
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:184] actor执行得到的输出messages: [{'content': '```', 'role': 'assistant', 'tool_calls': [], 'reasoning_content': None}]
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:186] message处理后的output信息: ```
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:480] 用户首条指令: 帮我烤个玉米
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:481] 机器人初识状态图片路径: assets/data/kling/franka/pick_up_the_apple/first_frame.jpg
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:67] 初始observation: images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'] video=None description=None
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:53] 开始初始化 MCTSNode, state=memory=Memory(history=[{'role': 'user', 'content': '帮我烤个玉米'}], current_stage=<Stage.ACTOR: 'actor'>, thought=None, proposed_actions=None, consideration=None, best_action_index=None, observation=Observation(images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'], video=None, description=None), reflection=None, state=<State.CONTINUE: 'continue'>) status=<RobotStatus.Available: 'Available'> task='帮我烤个玉米' hands_status=[{'hand': 'left', 'status': 'idle'}, {'hand': 'right', 'status': 'idle'}] skill_status=[] plan=[] images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'] video=None observation=Observation(images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'], video=None, description=None), action=None, parent=None 
+
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:57] 分配节点ID: 0
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:62] 未提供 fast_reward_details, 初始化为空字典
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:69] 设置 fast_reward 和 reward 为: 0.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:73] 保存 fast_reward_details: {}
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:77] 设置 is_terminal 为: False
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:89] 设置 calc_q 函数为: mean
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:94] 初始化访问次数 N=0, 累计奖励 Q=0.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:99] 节点为根节点, 设置 depth=0
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:441] 开始第 0 次迭代
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:304] [DEBUG]当前节点id: 0
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:307] [DEBUG]当前节点的孩子: None
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:304] [1;36mActor: message=ChatCompletionMessage(content='```', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], reasoning_content=None), cost=232.7ms[0m
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:184] actor执行得到的输出messages: [{'content': '```', 'role': 'assistant', 'tool_calls': [], 'reasoning_content': None}]
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:186] message处理后的output信息: ```
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:480] 用户首条指令: 把苹果放到抽屉里面
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:481] 机器人初识状态图片路径: assets/data/kling/franka/pick_up_the_apple/first_frame.jpg
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:67] 初始observation: images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'] video=None description=None
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:53] 开始初始化 MCTSNode, state=memory=Memory(history=[{'role': 'user', 'content': '把苹果放到抽屉里面'}], current_stage=<Stage.ACTOR: 'actor'>, thought=None, proposed_actions=None, consideration=None, best_action_index=None, observation=Observation(images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'], video=None, description=None), reflection=None, state=<State.CONTINUE: 'continue'>) status=<RobotStatus.Available: 'Available'> task='把苹果放到抽屉里面' hands_status=[{'hand': 'left', 'status': 'idle'}, {'hand': 'right', 'status': 'idle'}] skill_status=[] plan=[] images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'] video=None observation=Observation(images=['assets/data/kling/franka/pick_up_the_apple/first_frame.jpg'], video=None, description=None), action=None, parent=None 
+
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:57] 分配节点ID: 0
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:62] 未提供 fast_reward_details, 初始化为空字典
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:69] 设置 fast_reward 和 reward 为: 0.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:73] 保存 fast_reward_details: {}
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:77] 设置 is_terminal 为: False
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:89] 设置 calc_q 函数为: mean
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:94] 初始化访问次数 N=0, 累计奖励 Q=0.000000
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:99] 节点为根节点, 设置 depth=0
+[INFO:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:441] 开始第 0 次迭代
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:304] [DEBUG]当前节点id: 0
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/core/mcts.py:307] [DEBUG]当前节点的孩子: None
+[INFO:/root/kaiwu/kaiwu/agents/agent/chat_agent.py:304] [1;36mActor: message=ChatCompletionMessage(content='```', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], reasoning_content=None), cost=232.8ms[0m
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:184] actor执行得到的输出messages: [{'content': '```', 'role': 'assistant', 'tool_calls': [], 'reasoning_content': None}]
+[DEBUG:/root/kaiwu/kaiwu/agents/mcts/robot_mcts.py:186] message处理后的output信息: ```

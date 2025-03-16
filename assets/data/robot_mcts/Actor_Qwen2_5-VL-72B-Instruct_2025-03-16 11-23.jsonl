@@ -1,0 +1,48 @@
+[
+    {
+        "role": "system",
+        "content": "You are a emboided agent, your name is kaiwu.你当前的任务是结合图片信息，为完成用户的指令，想出三种不同的下一步动作，同时描述观察到的图片信息。## Follow the response format below in JSON\n```{\n    \"thought\": \"<string>\", // 深呼吸，然后充分思考。\n    \"proposed_actions\": \"<list[Action]>\", // 三种不同的下一步动作。Action的格式为{\"arguments\": <args-dict>, \"name\": <function-name>}。\n}```\n\n###可用工具###\n[{\"type\": \"function\", \"function\": {\"name\": \"perception\", \"description\": \"Obtain images to perceive and understand the environment.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": [], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"robotic_arm_operation\", \"description\": \"Control the robotic arm to complete the operation task.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"instruction\": {\"description\": \"Generate only one simple operation instruction in English for robotic arms to complete a specific task.\\nA instruction should consist of:\\n1. Action: Use action verbs like wipe and open to describe each step.\\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\\n3. Action Mode: using the left arm or right arm, not supporting both arms.\\nExamples 1: Grip the bottle using the left arm.\\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\\nExamples 3: Place the bottle in the center of the table using the right arm.\", \"title\": \"Instruction\", \"type\": \"string\"}}, \"required\": [\"instruction\"], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"google_search\", \"description\": \"联网搜索工具：用于在博查AI平台搜索信息。\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"description\": \"用户提出的问题或者搜索关键词。\", \"title\": \"Query\", \"type\": \"string\"}}, \"required\": [\"query\"], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_time\", \"description\": \"用于获取当前时间\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": [], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"description\": \"中文的区域名称\", \"title\": \"Query\", \"type\": \"string\"}}, \"required\": [\"query\"], \"additionalProperties\": false}}}]\n\n###辅助信息###\n当前你处于中国北京市通州区。\n现在的时间是2025-03-16 11:23:45, 周天。\n现在开始！\n"
+    },
+    {
+        "role": "user",
+        "content": "把苹果放到蓝色盘子里"
+    },
+    {
+        "content": "```",
+        "role": "assistant",
+        "tool_calls": [],
+        "reasoning_content": null
+    }
+]
+[
+    {
+        "role": "system",
+        "content": "You are a emboided agent, your name is kaiwu.你当前的任务是结合图片信息，为完成用户的指令，想出三种不同的下一步动作，同时描述观察到的图片信息。## Follow the response format below in JSON\n```{\n    \"thought\": \"<string>\", // 深呼吸，然后充分思考。\n    \"proposed_actions\": \"<list[Action]>\", // 三种不同的下一步动作。Action的格式为{\"arguments\": <args-dict>, \"name\": <function-name>}。\n}```\n\n###可用工具###\n[{\"type\": \"function\", \"function\": {\"name\": \"perception\", \"description\": \"Obtain images to perceive and understand the environment.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": [], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"robotic_arm_operation\", \"description\": \"Control the robotic arm to complete the operation task.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"instruction\": {\"description\": \"Generate only one simple operation instruction in English for robotic arms to complete a specific task.\\nA instruction should consist of:\\n1. Action: Use action verbs like wipe and open to describe each step.\\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\\n3. Action Mode: using the left arm or right arm, not supporting both arms.\\nExamples 1: Grip the bottle using the left arm.\\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\\nExamples 3: Place the bottle in the center of the table using the right arm.\", \"title\": \"Instruction\", \"type\": \"string\"}}, \"required\": [\"instruction\"], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"google_search\", \"description\": \"联网搜索工具：用于在博查AI平台搜索信息。\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"description\": \"用户提出的问题或者搜索关键词。\", \"title\": \"Query\", \"type\": \"string\"}}, \"required\": [\"query\"], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_time\", \"description\": \"用于获取当前时间\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": [], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"description\": \"中文的区域名称\", \"title\": \"Query\", \"type\": \"string\"}}, \"required\": [\"query\"], \"additionalProperties\": false}}}]\n\n###辅助信息###\n当前你处于中国北京市通州区。\n现在的时间是2025-03-16 11:23:45, 周天。\n现在开始！\n"
+    },
+    {
+        "role": "user",
+        "content": "帮我烤个玉米"
+    },
+    {
+        "content": "```",
+        "role": "assistant",
+        "tool_calls": [],
+        "reasoning_content": null
+    }
+]
+[
+    {
+        "role": "system",
+        "content": "You are a emboided agent, your name is kaiwu.你当前的任务是结合图片信息，为完成用户的指令，想出三种不同的下一步动作，同时描述观察到的图片信息。## Follow the response format below in JSON\n```{\n    \"thought\": \"<string>\", // 深呼吸，然后充分思考。\n    \"proposed_actions\": \"<list[Action]>\", // 三种不同的下一步动作。Action的格式为{\"arguments\": <args-dict>, \"name\": <function-name>}。\n}```\n\n###可用工具###\n[{\"type\": \"function\", \"function\": {\"name\": \"perception\", \"description\": \"Obtain images to perceive and understand the environment.\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": [], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"robotic_arm_operation\", \"description\": \"Control the robotic arm to complete the operation task.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"instruction\": {\"description\": \"Generate only one simple operation instruction in English for robotic arms to complete a specific task.\\nA instruction should consist of:\\n1. Action: Use action verbs like wipe and open to describe each step.\\n2. Object Interaction: Clearly identify objects involved, such as bottle or door. Ensure interactions are logical and resemble typical human actions.\\n3. Action Mode: using the left arm or right arm, not supporting both arms.\\nExamples 1: Grip the bottle using the left arm.\\nExamples 2: Wipe the bottle with a cloth, moving from top to bottom with the left arm.\\nExamples 3: Place the bottle in the center of the table using the right arm.\", \"title\": \"Instruction\", \"type\": \"string\"}}, \"required\": [\"instruction\"], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"google_search\", \"description\": \"联网搜索工具：用于在博查AI平台搜索信息。\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"description\": \"用户提出的问题或者搜索关键词。\", \"title\": \"Query\", \"type\": \"string\"}}, \"required\": [\"query\"], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_time\", \"description\": \"用于获取当前时间\", \"parameters\": {\"type\": \"object\", \"properties\": {}, \"required\": [], \"additionalProperties\": false}}}, {\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"即时天气查询工具,可以获取当前天气的详细信息, 如温度和湿度\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"description\": \"中文的区域名称\", \"title\": \"Query\", \"type\": \"string\"}}, \"required\": [\"query\"], \"additionalProperties\": false}}}]\n\n###辅助信息###\n当前你处于中国北京市通州区。\n现在的时间是2025-03-16 11:23:45, 周天。\n现在开始！\n"
+    },
+    {
+        "role": "user",
+        "content": "把苹果放到抽屉里面"
+    },
+    {
+        "content": "```",
+        "role": "assistant",
+        "tool_calls": [],
+        "reasoning_content": null
+    }
+]
