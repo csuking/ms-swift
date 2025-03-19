@@ -841,16 +841,15 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         return outputs"""
     
-    def _generate_and_score_completions(
-            self, inputs: list[dict[str, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
+    def _generate_and_score_completions(self, inputs: list[dict[str, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
         """
         输入格式:
         [
             {
-                'problem': problem,
-                'solution': solution,
                 'messages': messages,  # 对话形式
-                # 原本可能有 'reward'，但这里我们先检查并添加随机 reward
+                'images': images,  # 图像形式
+                'audios': audios,  # 音频形式
+                'videos': videos,  # 视频形式
             },
             ...
         ]
@@ -861,25 +860,42 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         3. 在编码前删除每个 input 中的 reward 字段；
         4. 其余流程保持不变，使用奖励计算优势（advantages）。
         """
-        logger.debug(f"inputs长度为: {len(inputs)}")
 
-        # 0. 对每个输入，如果没有 reward，随机添加一个 reward
+        input_rewards = []
+
+        # 0. 对每个输入，如果没有 reward，报错
         for inp in inputs:
-            if 'reward' not in inp:
-                # 随机生成一个 [0, 1) 范围内的浮点数作为 reward
-                inp['reward'] = torch.rand(1).item()
+            rewards = 0
+            for message in inp['messages']:
+                if message['role'] == 'assistant':
+                    logger.debug(f"message:{message}")
+                    if 'reward' not in message:
+                        raise ValueError("每个 assistant 消息必须包含 reward 字段") 
+                    rewards += message['reward']
+                    # 删除 'reward' 字段
+                    del message['reward'] 
+            input_rewards.append(rewards)
+
+        logger.debug(f"input_rewards:{input_rewards}")
+        # 1. 提取 inputs中reward
+        input_rewards = torch.tensor(input_rewards, dtype=torch.float32, device=self.accelerator.device)
+
+
+        # 这里仅在使用 vLLM/lmdeploy 模式下需要对全局数据做切片
+        if self.args.use_vllm or self.args.use_lmdeploy:
+            # 假设全局 inputs 的长度为 N，全局生成结果会有 N 条，
+            # 每个进程均从全局数据中选取一部分，计算方式如下：
+            process_slice = slice(
+                self.accelerator.process_index * len(inputs),
+                (self.accelerator.process_index + 1) * len(inputs)
+            )
+            logger.warning(f"全局inputs长度:{len(inputs)}")
+            logger.warning(f"process_slice:{process_slice}")
+        else:
+            # 对于常规生成，每个进程的 inputs 已经是局部数据，无需再做切片
+            process_slice = None
+
         
-        # 1. 提取 inputs 中的 solution 和 reward
-        inputs_solutions = [inp['solution'] for inp in inputs]
-        input_rewards = torch.tensor([inp['reward'] for inp in inputs],
-                                    dtype=torch.float32,
-                                    device=self.accelerator.device)
-        logger.info(f'未归一化前的rewards:{input_rewards}')
-
-        # 2. 在编码前删除每个输入的 reward 字段（防止影响编码过程）
-        for inp in inputs:
-            if 'reward' in inp:
-                del inp['reward']
 
         # 3. 使用更新后的 inputs 进行编码以获得输出结构（主要获得 labels 等信息）
         from copy import copy
@@ -887,7 +903,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         with self._template_context(template):
             batched_inputs = [template.encode(infer_request) for infer_request in inputs]
             outputs = to_device(template.data_collator(batched_inputs), self.model.device)
-        
+
         # 4. 计算 logits 等信息
         labels = outputs.pop('labels')
         logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
@@ -914,24 +930,17 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.num_generations > 1:
             # 将一维奖励重塑为二维：(B, num_generations)
             rewards_grouped = input_rewards.view(-1, self.num_generations)
-            logger.info(f"rewards_grouped: {rewards_grouped}")
             group_mean = rewards_grouped.mean(dim=1, keepdim=True)
-            logger.info(f"group_mean: {group_mean}")
             group_std = rewards_grouped.std(dim=1, keepdim=True)
-            logger.info(f"group_std: {group_std}")
             advantages = (rewards_grouped - group_mean) / (group_std + 1e-4)
-            logger.info(f"advantages: {advantages}")
             # 展平为一维张量
             advantages = advantages.view(-1)
         else:
             advantages = (input_rewards - input_rewards.mean()) / (input_rewards.std() + 1e-4)
         
-        # 对于分布式训练，切片仅保留当前进程对应部分
-        process_slice = slice(
-            self.accelerator.process_index * len(inputs),
-            (self.accelerator.process_index + 1) * len(inputs)
-        )
-        advantages = advantages[process_slice]
+        # 只有在使用 vLLM 或 lmdeploy 时，outputs 是全局数据，此时需要对优势做切片
+        if process_slice is not None:
+            advantages = advantages[process_slice]
 
         # 7. 记录指标
         mode = 'eval' if self.control.should_evaluate else 'train'
