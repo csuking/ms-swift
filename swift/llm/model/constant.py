@@ -14,7 +14,6 @@ class LLMModelType:
     qwq = 'qwq'
 
     qwen2_gte = 'qwen2_gte'
-    qwen2_gme = 'qwen2_gme'
 
     codefuse_qwen = 'codefuse_qwen'
     modelscope_agent = 'modelscope_agent'
@@ -90,6 +89,7 @@ class LLMModelType:
 
     gemma = 'gemma'
     gemma2 = 'gemma2'
+    gemma3_text = 'gemma3_text'
 
     skywork = 'skywork'
     skywork_o1 = 'skywork_o1'
@@ -132,6 +132,7 @@ class MLLMModelType:
     qwen2_5_vl = 'qwen2_5_vl'
     qwen2_audio = 'qwen2_audio'
     qvq = 'qvq'
+    qwen2_gme = 'qwen2_gme'
     ovis1_6 = 'ovis1_6'
     ovis1_6_llama3 = 'ovis1_6_llama3'
     ovis2 = 'ovis2'
@@ -210,6 +211,7 @@ class MLLMModelType:
     pixtral = 'pixtral'
     megrez_omni = 'megrez_omni'
     valley = 'valley'
+    gemma3_vision = 'gemma3_vision'
 
 
 class ModelType(LLMModelType, MLLMModelType, BertModelType, RMModelType):
