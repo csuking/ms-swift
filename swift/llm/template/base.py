@@ -1,6 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import hashlib
 import inspect
+import math
 import os
 import re
 from copy import deepcopy
@@ -40,6 +41,7 @@ class Template(ProcessorMixin):
     video_placeholder = ['<video>']
     audio_placeholder = ['<audio>']
     cot_process_placeholder = ['ки']
+    placeholder_tokens = []  # For clearer printing
     load_images = True
     skip_prompt = True
     use_model = False
@@ -97,6 +99,9 @@ class Template(ProcessorMixin):
         if response_prefix is not None:
             template_meta.response_prefix = response_prefix
 
+        for i, token in enumerate(self.placeholder_tokens):
+            if isinstance(token, str):
+                self.placeholder_tokens[i] = tokenizer.convert_tokens_to_ids(token)
         template_meta.init(tokenizer)
 
         self.template_meta: TemplateMeta = template_meta
@@ -112,11 +117,11 @@ class Template(ProcessorMixin):
         self.norm_bbox = norm_bbox or self.norm_bbox
         if self.is_encoder_decoder:
             self.skip_prompt = False
-
         self.mode: Literal['pt', 'vllm', 'lmdeploy',  # infer
                            'train', 'rlhf', 'kto',  # train
                            'seq_cls', 'embedding', 'prm'] = 'pt'
         self._packing = False
+        self.use_megatron = False
         if self.model_info.task_type != 'causal_lm':
             self.mode = self.model_info.task_type
         self._handles = []
@@ -259,30 +264,56 @@ class Template(ProcessorMixin):
         return encoded
 
     def _embedding_encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
-        sent1_inputs, sent2_inputs = inputs, deepcopy(inputs)
-        # move response to query
-        sent2_inputs.messages[-2]['content'] = sent2_inputs.messages[-1]['content']
-        sent1_inputs.messages[-1]['content'] = ''
-        sent2_inputs.messages[-1]['content'] = ''
-        if '<image>' not in sent1_inputs.messages[0]['content']:
-            sent1_inputs.images = []
-        if '<image>' not in sent2_inputs.messages[0]['content']:
-            sent2_inputs.images = []
-        chosen_encoded = self._encode(sent1_inputs)
-        rejected_encoded = self._encode(sent2_inputs)
+        _encoded = {}
+        labels = []
 
-        encoded = {}
-        for prefix in ['chosen', 'rejected']:
-            data = locals()[f'{prefix}_encoded']
-            for k, v in data.items():
-                encoded[f'{prefix}_{k}'] = v
-        encoded.pop('chosen_labels', None)
-        encoded.pop('rejected_labels', None)
-        if inputs.label is not None:
-            encoded['labels'] = float(inputs.label)
-        else:
-            encoded['labels'] = 0.0
-        return encoded
+        def split_multi_medias(_inputs):
+            _content = _inputs.messages[-2]['content']
+            image_size = len(re.findall('<image>', _content))
+            video_size = len(re.findall('<video>', _content))
+            audio_size = len(re.findall('<audio>', _content))
+            _inputs.images = inputs.images[:image_size]
+            assert len(_inputs.images) == image_size
+            inputs.images = inputs.images[image_size:]
+            _inputs.videos = inputs.videos[:video_size]
+            assert len(_inputs.videos) == video_size
+            inputs.videos = inputs.videos[video_size:]
+            _inputs.audios = inputs.audios[:audio_size]
+            assert len(_inputs.audios) == audio_size
+            inputs.audios = inputs.audios[audio_size:]
+
+        anchor = deepcopy(inputs)
+        anchor.messages[-1]['content'] = ''
+        anchor.rejected_response = []
+        split_multi_medias(anchor)
+        anchor_encoded = self._encode(anchor)
+        for key in anchor_encoded:
+            _encoded[f'anchor_{key}'] = anchor_encoded[key]
+
+        positive = deepcopy(inputs)
+        positive.messages[-2]['content'] = positive.messages[-1]['content']
+        positive.messages[-1]['content'] = ''
+        positive.rejected_response = []
+        split_multi_medias(positive)
+        positive_encoded = self._encode(positive)
+        for key in positive_encoded:
+            _encoded[f'positive_{key}'] = positive_encoded[key]
+        labels.append(float(inputs.label) if inputs.label is not None else 1.0)
+
+        rejected_len = len(inputs.rejected_response) if inputs.rejected_response else 0
+        for i in range(rejected_len):
+            negative = deepcopy(inputs)
+            negative.messages[-2]['content'] = negative.rejected_response[i]
+            negative.messages[-1]['content'] = ''
+            negative.rejected_response = []
+            split_multi_medias(negative)
+            negative_encoded = self._encode(negative)
+            for key in negative_encoded:
+                _encoded[f'negative{i}_{key}'] = negative_encoded[key]
+            labels.append(0.0)
+
+        _encoded['labels'] = labels
+        return _encoded
 
     def _seq_cls_encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
         encoded = self._encode(inputs)
@@ -332,6 +363,9 @@ class Template(ProcessorMixin):
                 encoded.pop(key)
         if return_template_inputs:
             encoded['template_inputs'] = inputs
+
+        if self.use_megatron and encoded.get('labels'):
+            encoded['labels'] = encoded['labels'][1:] + [-100]
         return encoded
 
     def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
@@ -653,6 +687,11 @@ class Template(ProcessorMixin):
     @staticmethod
     def _add_default_tags(inputs: StdTemplateInputs):
         total_content = '\n'.join([message['content'] or '' for message in inputs.messages])
+        if inputs.rejected_response:
+            if isinstance(inputs.rejected_response, str):
+                total_content += inputs.rejected_response
+            else:
+                total_content += '\n'.join(inputs.rejected_response)
         if inputs.system:
             total_content = f'{inputs.system}\n{total_content}'
         for media_type in ['image', 'audio', 'video']:
@@ -1039,8 +1078,19 @@ class Template(ProcessorMixin):
                                  batch: List[Dict[str, Any]],
                                  *,
                                  padding_to: Optional[int] = None) -> Dict[str, Any]:
-        labels = [b.pop('labels') for b in batch if b.get('labels') is not None]
-        res = self._rlhf_data_collator(batch, padding_to=padding_to)
+        labels = []
+        new_batch = []
+        for b in batch:
+            keys = [key for key in b.keys() if 'negative' in key]
+            max_neg = max([int(re.findall(r'negative(-?\d+)', key)[0]) for key in keys]) if keys else None
+            indexes = ['anchor_', 'positive_']
+            if max_neg is not None:
+                for i in range(0, max_neg + 1):
+                    indexes.append(f'negative{i}_')
+            for prefix in indexes:
+                new_batch += self._fetch_inputs_startswith([b], prefix)
+            labels.extend(b.get('labels', None))
+        res = self._data_collator(new_batch, padding_to=padding_to)
         if labels:
             res['labels'] = torch.tensor(labels, dtype=torch.float32)
         return res
@@ -1062,7 +1112,6 @@ class Template(ProcessorMixin):
             padding_to(`int`, optional): Whether padding the batch to a fixed length, if none, the batch
                 will be padded to the `longest`
         """
-        from swift.utils import use_torchacc
         assert self.tokenizer.pad_token_id is not None
         padding_side = self.padding_side if self.is_training else 'left'
         padding_right = padding_side == 'right'
@@ -1096,10 +1145,13 @@ class Template(ProcessorMixin):
             if not seq_lens:
                 seq_lens = [seq.shape[0] for seq in res[key]]
         packing_mode = self._packing and 'position_ids' in res
-        if not packing_mode and seq_lens and ('input_ids' in res or 'inputs_embeds' in res):
+        if not self.use_megatron and not packing_mode and seq_lens and ('input_ids' in res or 'inputs_embeds' in res):
             res['attention_mask'] = [torch.ones(seq_len, dtype=torch.int64) for seq_len in seq_lens]
             if self.is_training and self.padding_side == 'left':
                 res['position_ids'] = [torch.arange(seq_len, dtype=torch.int64) for seq_len in seq_lens]
+
+        if self.use_megatron:
+            padding_to = math.ceil(max(seq_lens) / 128) * 128
 
         for key, pad_value in zip(keys, pad_value):
             if key not in res:
@@ -1125,6 +1177,14 @@ class Template(ProcessorMixin):
             res['pixel_values_videos'] = torch.concat(pixel_values_videos)
         if use_torchacc() or self.sequence_parallel_size > 1:
             res = self._torchacc_xtuner_data_collator(res, padding_to, self.tokenizer, padding_side)
+        if self.use_megatron:
+            labels = res['labels']
+            loss_mask = (labels != -100).float()
+            position_ids = torch.arange(
+                labels.shape[1], dtype=torch.long, device=labels.device).unsqueeze(0).expand_as(labels).contiguous()
+            res['tokens'] = res.pop('input_ids')
+            res.update({'loss_mask': loss_mask, 'position_ids': position_ids})
+
         return res
 
     def _torchacc_xtuner_data_collator(self, res, padding_to, tokenizer, padding_side):
@@ -1253,7 +1313,7 @@ class Template(ProcessorMixin):
     def safe_decode(self, input_ids: List[int], **tokenizer_kwargs) -> str:
         if isinstance(self, Template):
             tokenizer = self.tokenizer
-            placeholder_tokens = self.template_meta.placeholder_tokens
+            placeholder_tokens = self.placeholder_tokens
         else:
             tokenizer = self
             placeholder_tokens = []
