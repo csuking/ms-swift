@@ -886,16 +886,27 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         # 0. 对每个输入，如果没有 reward，报错
         for inp in inputs:
+            # 找到最后一个 assistant 的索引
+            last_assistant_idx = max(
+                (i for i, msg in enumerate(inp['messages']) if msg['role'] == 'assistant'),
+                default=None
+            )
+            
+            if last_assistant_idx is None:
+                raise ValueError("消息列表中至少应该有一个 assistant 消息")
+            
             rewards = 0
-            for message in inp['messages']:
+
+            for i, message in enumerate(inp['messages']):
                 if message['role'] == 'assistant':
-                    logger.debug(f"message:{message}")
-                    if 'reward' not in message:
-                        raise ValueError("每个 assistant 消息必须包含 reward 字段") 
-                    rewards += message['reward']
-                    # 删除 'reward' 字段
-                    del message['reward'] 
-            input_rewards.append(rewards)
+                    if i == last_assistant_idx:
+                        if 'reward' not in message:
+                            raise ValueError("每个 assistant 消息必须包含 reward 字段")
+                        rewards += message['reward']  # 只有最后一个 assistant 累加 reward
+                        input_rewards.append(rewards)
+                    if 'reward' in message:
+                        del message['reward']  # 删除其他 assistant 的 reward
+
 
         logger.debug(f"input_rewards:{input_rewards}")
         # 1. 提取 inputs中reward
