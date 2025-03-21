@@ -883,7 +883,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         """
         
         input_advantages = []  # 用于存储每个输入对应的 advantage
-
+        input_rewards = []
         # 0. 处理每个输入：删除 assistant 消息中的 reward 字段，并提取顶层 advantage
         for inp in inputs:
             # 遍历每条消息，删除 assistant 消息中的 reward
@@ -952,6 +952,10 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         ).float().mean().item()
         self._metrics[mode]['response_clip_ratio'].append(response_clip_ratio)
         
+        self._metrics[mode]['reward'].append(advantages.mean().item())
+        self._metrics[mode]['reward_std'].append(advantages.mean().item())
+
+
         # 8. 如果需要日志记录 completions
         completions = [inp['messages'][-1]['content'] for inp in inputs]
         if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
@@ -965,6 +969,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 import pandas as pd
                 df = pd.DataFrame(table)
                 wandb.log({'completions': wandb.Table(dataframe=df)})
+
+
 
         # 9. 更新 outputs
         outputs.update({
@@ -1000,6 +1006,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             per_token_loss = per_token_loss + self.beta * per_token_kl
 
         loss = (per_token_loss * completion_mask).sum() / completion_mask.sum()
+        logger.info(f"loss: {loss}")
 
         # Log the metrics
         mode = 'eval' if self.control.should_evaluate else 'train'
