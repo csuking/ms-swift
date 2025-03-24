@@ -171,7 +171,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         num_processes = self.accelerator.num_processes
         global_batch_size = args.per_device_train_batch_size * num_processes
         possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-        if self.num_generations not in possible_values:
+        if self.num_generations not in possible_values and self.num_generations != 1:
             raise ValueError(
                 f'The global train batch size ({num_processes} x {args.per_device_train_batch_size}) must be evenly '
                 f'divisible by the number of generations per prompt ({self.num_generations}). Given the current train '
@@ -179,7 +179,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.args.eval_strategy != 'no':
             global_batch_size = args.per_device_eval_batch_size * num_processes
             possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-            if self.num_generations not in possible_values:
+            if self.num_generations not in possible_values and self.num_generations != 1:
                 raise ValueError(
                     f'The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly '
                     f'divisible by the number of generations per prompt ({self.num_generations}). Given the current '
@@ -712,8 +712,21 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
     def old_policy(self):
         return self.num_iterations > 1
 
-    def _generate_and_score_completions(
+    """def _generate_and_score_completions(
             self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
+
+        logger.debug(f"inputs长度为: {len(inputs)}")
+        inputs_solutions = []
+        for i, input in enumerate(inputs):
+            inputs_solutions.append(input['solution']) 
+
+
+        # 1. 我的inputs包含batch_size条input，然后每条input是一个字典，元素有problem，solution，reward，messages
+        # 2. 现在这个函数的做法是通过模型推理得到input中problem的solution，然后进行替换，在通过编码得到模型的outputs
+        # 3. 然后outputs中的信息比如ref_per_token_logps,advantages被更新
+        # 4. 现在我要修改这个函数，我的意图是让模型直接得到我的inputs里面的奖励，不需要采样，直接通过奖励更新advantages
+        # 5. 因为我的inputs里面有solutions，所以我要修改一下专门针对我这种方法计算ref_per_token_logps,因为现在自定义的方法似乎是需要根据更新后的inputs编码得到outputs，再根据其中的信息计算的，你帮我看看怎么改
+        # 6. 大体上的流程和现在的函数一致，只是我的数据带有奖励，所以不需要它的采样已以及计算奖励函数
 
         device = self.accelerator.device
         # Generate completions using either vLLM or regular generation
@@ -735,6 +748,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             if is_multimodal:
                 self.template.register_post_encode_hook(models)
 
+
         # Slice to keep only the local part of the data
         process_slice = slice(
             self.accelerator.process_index * len(inputs),
@@ -747,6 +761,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             messages = inputs[i]['messages']
             InferRequest.remove_response(messages)
             messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
+            
         from copy import copy
         template = copy(self.template)
         with self._template_context(template):
@@ -775,6 +790,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         rewards_per_func = torch.zeros((len(inputs), len(self.reward_funcs)), device=device)
         completions = [example['messages'][-1]['content'] for example in inputs]
+
 
         for i, (reward_func, reward_template) in enumerate(zip(self.reward_funcs, self.reward_templates)):
             if isinstance(reward_func, nn.Module):  # Module instead of PretrainedModel for compat with compiled models
@@ -844,7 +860,126 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 df = pd.DataFrame(table)
                 wandb.log({'completions': wandb.Table(dataframe=df)})
 
+        return outputs"""
+        
+    def _generate_and_score_completions(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
+        """
+        输入格式:
+        [
+            {
+                'messages': messages,  # 对话形式
+                'advantage': advantage, # 优势值（直接使用，不做分组统计）
+                'images': images,       # 图像形式
+                'audios': audios,       # 音频形式
+                'videos': videos,       # 视频形式
+            },
+            ...
+        ]
+        
+        修改要求：
+        1. 禁止 inputs 复制
+        2. 直接从 inputs 中提取出 advantage，不需要计算 reward（并删除 assistant 消息中的 reward 字段）
+        3. 优势值直接赋值，保持形状不变
+        """
+        
+        input_advantages = []  # 用于存储每个输入对应的 advantage
+        input_rewards = []
+        # 0. 处理每个输入：删除 assistant 消息中的 reward 字段，并提取顶层 advantage
+        for inp in inputs:
+            # 遍历每条消息，删除 assistant 消息中的 reward
+            for message in inp['messages']:
+                if message['role'] == 'assistant' and 'reward' in message:
+                    del message['reward']
+            # 提取顶层 advantage 字段
+            if 'advantage' not in inp:
+                raise ValueError("每个输入必须包含 advantage 字段")
+            input_advantages.append(inp['advantage'])
+            # 删除该字段，避免后续编码时影响
+            del inp['advantage']
+        
+        
+        # 将提取的 advantage 转换为张量，形状保持不变
+        input_advantages = torch.tensor(input_advantages, dtype=torch.float32, device=self.accelerator.device)
+        # 仅在使用 vLLM/lmdeploy 模式下，需要对全局数据做切片
+        if self.args.use_vllm or self.args.use_lmdeploy:
+            process_slice = slice(
+                self.accelerator.process_index * len(inputs),
+                (self.accelerator.process_index + 1) * len(inputs)
+            )
+        else:
+            process_slice = None
+
+        # 3. 使用更新后的 inputs 进行编码以获得输出结构（主要获得 labels 等信息）
+        from copy import copy
+        template = copy(self.template)
+        with self._template_context(template):
+            batched_inputs = [template.encode(infer_request) for infer_request in inputs]
+            outputs = to_device(template.data_collator(batched_inputs), self.model.device)
+            
+        # 4. 计算 logits 等信息
+        labels = outputs.pop('labels')
+        logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
+        outputs['logits_to_keep'] = logits_to_keep
+        outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
+
+        # 5. 计算 old_per_token_logps 和 ref_per_token_logps（保持原流程）
+        with torch.no_grad():
+            if self.old_policy:
+                outputs['old_per_token_logps'] = self._get_per_token_logps(self.model, outputs)
+            else:
+                outputs['old_per_token_logps'] = None
+
+            if self.beta == 0.0:
+                ref_per_token_logps = None
+            elif self.ref_model is not None:
+                ref_per_token_logps = self._get_per_token_logps(self.ref_model, outputs)
+            else:
+                with self.accelerator.unwrap_model(self.model).disable_adapter():
+                    ref_per_token_logps = self._get_per_token_logps(self.model, outputs)
+
+        # 6. 直接使用提取的 advantage，不做分组计算，保持原始形状
+        advantages = input_advantages.clone()  # 直接赋值
+        if process_slice is not None:
+            advantages = advantages[process_slice]
+
+        # 7. 记录指标
+        mode = 'eval' if self.control.should_evaluate else 'train'
+        completion_length = self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)).float().mean().item()
+        self._metrics[mode]['completion_length'].append(completion_length)
+        response_clip_ratio = torch.gt(
+            self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)),
+            self.args.max_completion_length
+        ).float().mean().item()
+        self._metrics[mode]['response_clip_ratio'].append(response_clip_ratio)
+        
+        self._metrics[mode]['reward'].append(advantages.mean().item())
+        self._metrics[mode]['reward_std'].append(advantages.mean().item())
+
+
+        # 8. 如果需要日志记录 completions
+        completions = [inp['messages'][-1]['content'] for inp in inputs]
+        if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
+            table = {
+                'step': [str(self.state.global_step)] * len(input_advantages),
+                'messages': [inp['messages'][:-1] for inp in inputs],
+                'completion': completions,
+            }
+            self.jsonl_writer.append(table)
+            if 'wandb' in self.args.report_to and wandb.run is not None and self.accelerator.is_main_process:
+                import pandas as pd
+                df = pd.DataFrame(table)
+                wandb.log({'completions': wandb.Table(dataframe=df)})
+
+
+
+        # 9. 更新 outputs
+        outputs.update({
+            'ref_per_token_logps': ref_per_token_logps,
+            'advantages': advantages,
+        })
+
         return outputs
+
 
     @profiling_decorator
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -871,6 +1006,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             per_token_loss = per_token_loss + self.beta * per_token_kl
 
         loss = (per_token_loss * completion_mask).sum() / completion_mask.sum()
+        logger.info(f"loss: {loss}")
 
         # Log the metrics
         mode = 'eval' if self.control.should_evaluate else 'train'
