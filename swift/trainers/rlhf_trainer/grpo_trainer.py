@@ -36,7 +36,7 @@ from .rlhf_mixin import RLHFTrainerMixin
 try:
     from trl.extras.profiling import profiling_decorator
 except ImportError:
-    raise ImportError('Please install trl from source using: `pip install git+https://github.com/huggingface/trl.git`')
+    raise ImportError('Please install trl from source using: `pip install -U trl`')
 
 del HFGRPOTrainer.__init__
 
@@ -282,7 +282,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         # Multi-step
         self.num_iterations = args.num_iterations  # = 𝜇 in the GRPO paper
-        self.epsilon = args.epsilon
+        self.epsilon_low = args.epsilon
+        self.epsilon_high = args.epsilon_high if args.epsilon_high is not None else args.epsilon
+
         # Tracks the number of iterations (forward + backward passes), including those within a gradient accumulation cycle. # noqa
         self._step = 0
         # Buffer the batch to reuse generated outputs across multiple updates. For more details, see
@@ -290,6 +292,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self._buffered_inputs = [None] * args.gradient_accumulation_steps
         if self.args.async_generate:
             self.add_callback(GRPOCallback(self))
+        self.set_multi_turn_engine_default_max_tokens()
 
     def split_batches(self):
         """Sync weights in batches
@@ -318,7 +321,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                         llm = llm[0]
                     if name.startswith('base_model'):
                         name = name.replace('base_model.', '')
-                    if name in llm:
+                    if llm in name:
                         layer_count = len(module)
                 else:
                     layer_count = len(module)
@@ -609,6 +612,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 if is_peft_model(unwrapped_model):
                     unwrapped_model.unmerge_adapter()
 
+        if self.infer_rank >= 0 and self.args.use_vllm and self.args.vllm_enable_prefix_caching:
+            self.engine.engine.reset_prefix_cache()
+
     def _wait_queue(self):
         while self._queue.empty():
             time.sleep(0.01)
@@ -624,7 +630,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         return [index_to_output[idx] for idx in sorted(index_to_output.keys())]
 
-    def _infer_multi_turn(self, inputs_slice, request_config):
+    def _infer_multi_turn(self, inputs_slice, request_config) -> List[List[List[Dict[str, Any]]]]:
         from swift.llm.infer.protocol import ChatCompletionResponse
         rank, _, _, _ = get_dist_setting()
         request_config = copy(request_config)
@@ -660,7 +666,11 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 if self.args.tensor_parallel_size > 1:
                     # avoid duplicate calling in the same tensor parallel group
                     import torch.distributed as dist
-                    dist.broadcast_object_list(results, group_src=0, group=self.group)
+                    if 'group_src' in inspect.signature(dist.broadcast_object_list).parameters:
+                        dist.broadcast_object_list(results, group_src=0, group=self.group)
+                    else:
+                        global_src = dist.get_global_rank(self.group, 0)
+                        dist.broadcast_object_list(results, src=global_src, group=self.group)
                 inputs_slice = [r for r in results if not r['finished']]
                 for idx, r in enumerate(results):
                     if r['finished']:
@@ -820,6 +830,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 self.model.train()
             if is_multimodal:
                 self.template.register_post_encode_hook(models)
+            if isinstance(outputs[0][0], list):
+                outputs = [output[0] for output in outputs]
 
         # Slice to keep only the local part of the data
         process_slice = slice(
@@ -960,7 +972,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         advantages = inputs['advantages']
         old_per_token_logps = inputs['old_per_token_logps'] if self.old_policy else per_token_logps.detach()
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
-        coef_2 = torch.clamp(coef_1, 1 - self.epsilon, 1 + self.epsilon)
+        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
         per_token_loss1 = coef_1 * advantages.unsqueeze(1)
         per_token_loss2 = coef_2 * advantages.unsqueeze(1)
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
@@ -977,7 +989,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
             metrics['kl'] = mean_kl
 
-        is_clipped = (per_token_loss1 < per_token_loss2).float()
+        is_clipped = (coef_1 < (1 - self.epsilon_low)) | (coef_1 > (1 + self.epsilon_high))
         clip_ratio = (is_clipped * completion_mask).sum() / completion_mask.sum()
         metrics['clip_ratio'] = clip_ratio
 
@@ -1103,3 +1115,18 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             return self.eval_queue
         else:
             return self.train_queue
+
+    def set_multi_turn_engine_default_max_tokens(self):
+        # Reset max_model_len to ensure that the total length during multi-turn generation
+        # does not exceed max_tokens, i.e., max_completion_length
+        if self.multi_turn_func:
+            origin_set_default_max_tokens = self.engine.set_default_max_tokens
+
+            def new_set_default_max_tokens(_self, request_config: RequestConfig, inputs: Dict[str, Any]) -> None:
+                max_model_len = _self.max_model_len or 8192
+                max_prompt_length = self.template.max_length
+                _self.max_model_len = min(max_model_len, max_prompt_length + request_config.max_tokens)
+                _self.origin_set_default_max_tokens(request_config, inputs)
+
+            self.engine.set_default_max_tokens = MethodType(new_set_default_max_tokens, self.engine)
+            self.engine.origin_set_default_max_tokens = origin_set_default_max_tokens
