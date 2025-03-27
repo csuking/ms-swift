@@ -103,7 +103,7 @@ class DeepseekVLTemplate(Template):
 
     def _post_encode(self, model: nn.Module, inputs: Dict[str, Any]) -> Dict[str, Any]:
         if not inputs.get('generate_mode'):
-            inputs['pixel_values'] = inputs['pixel_values'].to(dtype=self.config.torch_dtype)
+            inputs['pixel_values'] = inputs['pixel_values'].to(dtype=self.model_info.torch_dtype)
             inputs_embeds = model.prepare_inputs_embeds(**inputs)
             return {'inputs_embeds': inputs_embeds}
         else:
@@ -247,12 +247,12 @@ register_template(DeepseekV2_5TemplateMeta(LLMTemplateType.deepseek_v2_5))
 
 class DeepseekR1Template(Template):
 
-    def _encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
+    def _swift_encode(self, inputs: StdTemplateInputs):
         if not self.is_training:
             for message in inputs.messages:
                 if message['role'] == 'assistant' and isinstance(message['content'], str):
                     message['content'] = message['content'].split('</think>')[-1]
-        return super()._encode(inputs)
+        return super()._swift_encode(inputs)
 
 
 register_template(
@@ -290,7 +290,7 @@ class DeepseekVL2Template(DeepseekVLTemplate):
             images_seq_mask=torch.tensor(images_seq_mask),
             images_spatial_crop=torch.tensor(images_spatial_crop),
             num_image_tokens=num_image_tokens)
-        output.images = output.images.to(dtype=self.config.torch_dtype)
+        output.images = output.images.to(dtype=self.model_info.torch_dtype)
         encoded = {'output': output, 'input_ids': input_ids, 'labels': labels}
         return encoded
 
