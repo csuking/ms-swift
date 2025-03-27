@@ -178,7 +178,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         num_processes = self.accelerator.num_processes
         global_batch_size = args.per_device_train_batch_size * num_processes
         possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-        if self.num_generations not in possible_values:
+        if self.num_generations not in possible_values and self.num_generations != 1:
             raise ValueError(
                 f'The global train batch size ({num_processes} x {args.per_device_train_batch_size}) must be evenly '
                 f'divisible by the number of generations per prompt ({self.num_generations}). Given the current train '
@@ -186,7 +186,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.args.eval_strategy != 'no':
             global_batch_size = args.per_device_eval_batch_size * num_processes
             possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-            if self.num_generations not in possible_values:
+            if self.num_generations not in possible_values and self.num_generations!= 1:
                 raise ValueError(
                     f'The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly '
                     f'divisible by the number of generations per prompt ({self.num_generations}). Given the current '
