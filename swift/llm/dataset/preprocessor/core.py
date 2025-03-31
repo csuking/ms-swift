@@ -49,7 +49,6 @@ class RowPreprocessor:
         if 'messages' not in row:
             return
         messages = row['messages']
-        logger.warning(f'messages: {messages}')
         assert len(messages) > 0, f'messages: {messages}'
         # 修改：对于 assistant 消息，允许保留 reward 字段
         for message in messages:
