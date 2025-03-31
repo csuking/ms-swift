@@ -14,6 +14,8 @@ from math import ceil
 from queue import Queue
 from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Union
+from torch.utils.data import SequentialSampler
+
 
 import numpy as np
 import torch
@@ -186,7 +188,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.args.eval_strategy != 'no':
             global_batch_size = args.per_device_eval_batch_size * num_processes
             possible_values = [n_gen for n_gen in range(2, global_batch_size + 1) if (global_batch_size) % n_gen == 0]
-            if self.num_generations not in possible_values and self.num_generations!= 1:
+            if self.num_generations not in possible_values and self.num_generations != 1:
                 raise ValueError(
                     f'The global eval batch size ({num_processes} x {args.per_device_eval_batch_size}) must be evenly '
                     f'divisible by the number of generations per prompt ({self.num_generations}). Given the current '
@@ -293,6 +295,14 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         if self.args.async_generate:
             self.add_callback(GRPOCallback(self))
         self.set_multi_turn_engine_default_max_tokens()
+
+    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
+        if self.train_dataset is None or not hasattr(self.train_dataset, '__len__'):
+            return None
+        sequential_sampler = torch.utils.data.SequentialSampler(self.train_dataset)
+        return sequential_sampler
+
+
 
     def split_batches(self):
         """Sync weights in batches
