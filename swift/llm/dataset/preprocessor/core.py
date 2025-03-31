@@ -50,15 +50,14 @@ class RowPreprocessor:
             return
         messages = row['messages']
         assert len(messages) > 0, f'messages: {messages}'
-        # 修改：对于 assistant 消息，允许保留 reward 字段
+        reward = 0.0
         for message in messages:
-            if message.get("role") == "assistant":
-                allowed_keys = {'role', 'content', 'reward'}
-            else:
-                allowed_keys = {'role', 'content'}
-            keys = set(message.keys()) - allowed_keys
+            if "reward" in message:
+                reward = message.pop('reward')
+            keys = set(message.keys()) - {'role', 'content'}
             for key in keys:
                 message.pop(key)
+        row['reward'] = reward
         
         if messages[0]['role'] == 'system':
             messages = messages[1:]
