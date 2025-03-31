@@ -49,13 +49,18 @@ class RowPreprocessor:
         if 'messages' not in row:
             return
         messages = row['messages']
+        logger.warning(f'messages: {messages}')
         assert len(messages) > 0, f'messages: {messages}'
-        # fix swift/SlimOrca
+        # 修改：对于 assistant 消息，允许保留 reward 字段
         for message in messages:
-            keys = set(message.keys()) - {'role', 'content'}
+            if message.get("role") == "assistant":
+                allowed_keys = {'role', 'content', 'reward'}
+            else:
+                allowed_keys = {'role', 'content'}
+            keys = set(message.keys()) - allowed_keys
             for key in keys:
                 message.pop(key)
-
+        
         if messages[0]['role'] == 'system':
             messages = messages[1:]
         if messages and messages[0]['role'] == 'assistant':
