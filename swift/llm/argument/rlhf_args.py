@@ -56,6 +56,8 @@ class GRPOArguments(GRPOArgumentsMixin):
     # multi step
     num_iterations: int = 1
 
+    truncation_strategy: Literal['delete', 'left', 'right', None] = None
+
 
 @dataclass
 class RLHFArguments(GRPOArguments, PPOArguments, RewardModelArguments, TrainArguments):
@@ -108,7 +110,6 @@ class RLHFArguments(GRPOArguments, PPOArguments, RewardModelArguments, TrainArgu
         self._init_ppo()
         self._set_default()
         super().__post_init__()
-        self._init_grpo_ds3()
         self._check_rlhf()
         self._check_grpo()
 
@@ -139,7 +140,11 @@ class RLHFArguments(GRPOArguments, PPOArguments, RewardModelArguments, TrainArgu
                 self.gradient_accumulation_steps = 1
             self.remove_unused_columns = False
             logger.info(f'Setting args.remove_unused_columns: {self.remove_unused_columns}')
-            self.truncation_strategy = 'left'  # Used for trimming the excessively long parts of a prompt.
+            if self.truncation_strategy is None:
+                self.truncation_strategy = 'left'
+            assert self.truncation_strategy == 'left', \
+                "GRPO requires `truncation_strategy='left'`," \
+                f"Current value: `truncation_strategy='{self.truncation_strategy}'`."
             if self.beta is None:
                 self.beta = 0.04  # https://arxiv.org/abs/2402.03300
             if self.async_generate:
@@ -147,6 +152,12 @@ class RLHFArguments(GRPOArguments, PPOArguments, RewardModelArguments, TrainArgu
                             'will use the old weights to generate responses to accelerate. '
                             'This will ignore the `CLIP` of advantages, if you found the training '
                             'is unstable, you may consider using --async_generate false.')
+            if 'soft_overlong' in self.reward_funcs:
+                assert self.soft_cache_length is not None, \
+                    'The soft_cache_length must be set when using soft overlong rewards.'
+                if self.soft_max_length is None:
+                    self.soft_max_length = self.max_completion_length
+                    logger.info(f'Auto-configured soft_max_length = max_completion_length {self.max_completion_length}')
 
     def _init_ppo(self):
         if self.rlhf_type == 'ppo':
@@ -183,11 +194,6 @@ class RLHFArguments(GRPOArguments, PPOArguments, RewardModelArguments, TrainArgu
             elif self.rlhf_type in ['kto']:
                 self.loss_type = 'kto'
 
-    def _init_grpo_ds3(self):
-        if self.rlhf_type == 'grpo' and self.deepspeed:
-            if 'zero_optimization' in self.deepspeed and self.deepspeed['zero_optimization']['stage'] == 3:
-                self.deepspeed['zero_optimization']['stage3_prefetch_bucket_size'] = 0
-
     def _check_rlhf(self):
         if self.sequence_parallel_size > 1:
             raise ValueError('RLHF do not support sequence parallel')
@@ -209,7 +215,7 @@ class RLHFArguments(GRPOArguments, PPOArguments, RewardModelArguments, TrainArgu
                     f'Colocate mode requires device_count({device_count}) == num_infer_workers({num_infer_workers}). '
                     'Please check if your device count matches NPROC_PER_NODE setting.')
                 logger.info(
-                    'You are using colocate mode because you have set num_infer_workers to be the same as'
+                    'You are using colocate mode because you have set num_infer_workers to be the same as '
                     'NPROC_PER_NODE, where model training and sampling will be performed on a single GPU. '
                     'If you encounter an Out-of-Memory (OOM) error, it is recommended to set the `sleep_level`, '
                     '`offload_model`, and `offload_optimizer` parameters.')

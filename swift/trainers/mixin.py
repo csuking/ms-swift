@@ -224,7 +224,12 @@ class SwiftMixin:
         if not is_adapter:
             from swift.llm import save_checkpoint
             additional_saved_files = self.model_meta.additional_saved_files
-            save_checkpoint(None, self.template.processor, output_dir, additional_saved_files=additional_saved_files)
+            save_checkpoint(
+                None,
+                self.template.processor,
+                output_dir,
+                model_dirs=[self.model.model_dir],
+                additional_saved_files=additional_saved_files)
             if getattr(self.model, 'origin_generation_config', None):
                 self.model.origin_generation_config.save_pretrained(output_dir)
 
@@ -357,19 +362,6 @@ class SwiftMixin:
                 self.create_scheduler(num_training_steps=num_training_steps, optimizer=self.optimizer)
         else:
             super().create_optimizer_and_scheduler(num_training_steps=num_training_steps)
-
-    def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
-        if self.args.train_sampler_random:
-            return super()._get_train_sampler()
-        else:
-            return self._get_eval_sampler(self.train_dataset)
-
-    def get_train_dataloader(self):
-        if self.template.sequence_parallel_size == 1:
-            return super().get_train_dataloader()
-        else:
-            from swift.trainers.xtuner import get_xtuner_train_dataloader
-            return get_xtuner_train_dataloader(self)
 
     def _compute_acc(self, outputs, labels) -> None:
         args = self.args

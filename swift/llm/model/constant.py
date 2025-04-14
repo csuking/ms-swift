@@ -130,6 +130,7 @@ class MLLMModelType:
     qwen_audio = 'qwen_audio'
     qwen2_vl = 'qwen2_vl'
     qwen2_5_vl = 'qwen2_5_vl'
+    qwen2_5_omni = 'qwen2_5_omni'
     qwen2_audio = 'qwen2_audio'
     qvq = 'qvq'
     qwen2_gme = 'qwen2_gme'
@@ -150,12 +151,14 @@ class MLLMModelType:
     internvl2 = 'internvl2'
     internvl2_phi3 = 'internvl2_phi3'
     internvl2_5 = 'internvl2_5'
+    internvl3 = 'internvl3'
     xcomposer2 = 'xcomposer2'
     xcomposer2_4khd = 'xcomposer2_4khd'
     xcomposer2_5 = 'xcomposer2_5'
     xcomposer2_5_ol_audio = 'xcomposer2_5_ol_audio'
 
     llama3_2_vision = 'llama3_2_vision'
+    llama4 = 'llama4'
     llama3_1_omni = 'llama3_1_omni'
 
     llava1_5_hf = 'llava1_5_hf'

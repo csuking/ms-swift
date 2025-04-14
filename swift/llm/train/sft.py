@@ -11,7 +11,8 @@ from swift.utils import (append_to_jsonl, get_logger, get_model_parameter_info, 
                          use_torchacc)
 from ..argument import TrainArguments
 from ..base import SwiftPipeline
-from ..dataset import EncodePreprocessor, GetLengthPreprocessor, LazyLLMDataset, PackingPreprocessor, load_dataset
+from ..dataset import (EncodePreprocessor, GetLengthPreprocessor, IterablePackingDataset, LazyLLMDataset,
+                       PackingDataset, load_dataset)
 from ..infer import prepare_generation_config
 from ..model import HfConfigFactory, get_model_arch
 from ..utils import deep_getattr, dynamic_gradient_checkpointing
@@ -81,10 +82,11 @@ class SwiftSft(SwiftPipeline, TunerMixin):
         args = self.args
         dataset_kwargs = args.get_dataset_kwargs()
         train_dataset, val_dataset = load_dataset(
-            args.dataset, split_dataset_ratio=args.split_dataset_ratio, **dataset_kwargs)
+            args.dataset, split_dataset_ratio=args.split_dataset_ratio, shuffle=args.dataset_shuffle, **dataset_kwargs)
         if len(args.val_dataset) > 0:
             # Loading val dataset
-            _, val_dataset = load_dataset(args.val_dataset, split_dataset_ratio=1.0, **dataset_kwargs)
+            _, val_dataset = load_dataset(
+                args.val_dataset, split_dataset_ratio=1.0, shuffle=args.val_dataset_shuffle, **dataset_kwargs)
             assert args.split_dataset_ratio == 0.
         logger.info(f'train_dataset: {train_dataset}')
         logger.info(f'val_dataset: {val_dataset}')
@@ -223,8 +225,14 @@ class SwiftSft(SwiftPipeline, TunerMixin):
 
     def _stat_dataset(self, dataset: HfDataset):
         args = self.args
-        dataset = GetLengthPreprocessor()(dataset, num_proc=args.dataset_num_proc)
-        _, stat_str = stat_array(dataset['length'])
+        if isinstance(dataset, HfDataset):
+            dataset = GetLengthPreprocessor()(dataset, num_proc=args.dataset_num_proc)
+            length = dataset['length']
+        else:
+            length = []
+            for row in dataset:
+                length.append(max([len(row[k]) for k in row.keys() if k.endswith('input_ids')]))
+        _, stat_str = stat_array(length)
         logger.info(f'Dataset Token Length: {stat_str}')
         return stat_str
 
@@ -232,32 +240,42 @@ class SwiftSft(SwiftPipeline, TunerMixin):
         template = self.template
         args = self.args
         is_grpo = hasattr(args, 'rlhf_type') and args.rlhf_type == 'grpo'
+        predict_with_generate = getattr(args, 'predict_with_generate', False)
         if not is_grpo:
-            if args.lazy_tokenize:
+            if args.packing:
+                packing_dataset_cls = IterablePackingDataset if args.streaming else PackingDataset
+                train_dataset = packing_dataset_cls(
+                    self.template, train_dataset, num_workers=args.dataset_num_proc, strict=args.strict)
+                if val_dataset is not None:
+                    val_dataset = packing_dataset_cls(
+                        self.template, val_dataset, num_workers=args.dataset_num_proc, strict=args.strict)
+            elif args.lazy_tokenize:
                 train_dataset = LazyLLMDataset(
                     train_dataset, template.encode, strict=args.strict, random_state=args.data_seed)
-                if val_dataset is not None and not args.predict_with_generate:
+                if val_dataset is not None and not predict_with_generate:
                     val_dataset = LazyLLMDataset(
                         val_dataset, template.encode, strict=args.strict, random_state=args.data_seed)
             else:
-                preprocessor_cls = PackingPreprocessor if args.packing else EncodePreprocessor
-                preprocessor = preprocessor_cls(template=template)
+                preprocessor = EncodePreprocessor(template=template)
                 train_dataset = preprocessor(train_dataset, num_proc=args.dataset_num_proc, strict=args.strict)
-                if val_dataset is not None and not args.predict_with_generate:
+                if val_dataset is not None and not predict_with_generate:
                     val_dataset = preprocessor(val_dataset, num_proc=args.dataset_num_proc, strict=args.strict)
 
-            inputs = train_dataset[0] if hasattr(train_dataset, '__len__') else next(iter(train_dataset))
-            template.print_inputs(inputs, tokenizer_kwargs=inputs.pop('tokenizer_kwargs', None) or {})
-            if isinstance(train_dataset, HfDataset):
+            if is_master():
+                inputs = train_dataset[0] if hasattr(train_dataset, '__len__') else next(iter(train_dataset))
+                template.print_inputs(inputs, tokenizer_kwargs=inputs.pop('tokenizer_kwargs', None) or {})
+            if isinstance(train_dataset, (HfDataset, PackingDataset)):
                 self.train_msg['train_dataset'] = self._stat_dataset(train_dataset)
-                if val_dataset is not None and not args.predict_with_generate:
+                if val_dataset is not None and not predict_with_generate:
                     self.train_msg['val_dataset'] = self._stat_dataset(val_dataset)
 
-        if val_dataset is None:
+        if val_dataset is None and hasattr(args, 'training_args'):
             args.training_args.evaluation_strategy = IntervalStrategy.NO
             args.training_args.eval_strategy = IntervalStrategy.NO
 
-        args.problem_type = args.problem_type or getattr(self.model.config, 'problem_type', None)
+        if args.task_type == 'seq_cls':
+            args.problem_type = args.problem_type or getattr(self.model.config, 'problem_type', None)
+            logger.info(f'args.problem_type: {args.problem_type}')
         return train_dataset, val_dataset
 
 

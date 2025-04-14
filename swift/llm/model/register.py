@@ -8,6 +8,8 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
+import transformers
+from packaging import version
 from peft import PeftModel
 from transformers import (AutoConfig, AutoModel, AutoModelForCausalLM, AutoModelForSequenceClassification,
                           AutoTokenizer, GenerationConfig, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase)
@@ -154,6 +156,28 @@ def load_by_unsloth(args):
     return model, processor
 
 
+def _patch_awq_compat(model_info):
+    if version.parse(transformers.__version__) < version.parse('4.50') or model_info.quant_method != 'awq':
+        return
+
+    try:
+        # compat transformers>=4.50 (autoawq)
+        from transformers.quantizers.quantizer_awq import AwqQuantizer
+        from transformers.integrations import get_keys_to_not_convert
+        _process_model_before_weight_loading = AwqQuantizer._process_model_before_weight_loading
+
+        def _new_process_model_before_weight_loading(self, model, *args, **kwargs):
+            modules_to_not_convert = self.quantization_config.modules_to_not_convert
+            if modules_to_not_convert is not None:
+                self.quantization_config.modules_to_not_convert = list(
+                    modules_to_not_convert) + get_keys_to_not_convert(model)
+            return _process_model_before_weight_loading(self, model, *args, **kwargs)
+
+        AwqQuantizer._process_model_before_weight_loading = _new_process_model_before_weight_loading
+    except Exception:
+        pass
+
+
 def get_model_tokenizer_from_local(model_dir: str,
                                    model_info: ModelInfo,
                                    model_kwargs: Dict[str, Any],
@@ -189,6 +213,7 @@ def get_model_tokenizer_from_local(model_dir: str,
 
     model = None
     if load_model:
+        _patch_awq_compat(model_info)
         logger.info(f'model_kwargs: {model_kwargs}')
         # fix seq_cls
         if model_info.task_type == 'seq_cls' and automodel_class is None:
@@ -220,6 +245,10 @@ def get_model_tokenizer_from_local(model_dir: str,
             patch_output_normalizer(model, model_meta=model_meta)
 
     model_info.config = model_config if model is None else model.config
+    if model:
+        # fix seq classification task
+        pad_token_id = model.config.pad_token_id or tokenizer.pad_token_id
+        HfConfigFactory.set_model_config_attr(model, 'pad_token_id', pad_token_id)
     return model, tokenizer
 
 
@@ -374,18 +403,21 @@ def _read_args_json_model_type(model_dir):
 
 
 def _get_model_info(model_dir: str, model_type: Optional[str], quantization_config) -> ModelInfo:
-    config_dict = PretrainedConfig.get_config_dict(model_dir)[0]
+    try:
+        config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    except Exception:
+        config = PretrainedConfig.get_config_dict(model_dir)[0]
     if quantization_config is not None:
-        config_dict['quantization_config'] = quantization_config
-    quant_info = HfConfigFactory.get_quant_info(config_dict) or {}
-    torch_dtype = HfConfigFactory.get_torch_dtype(config_dict, quant_info)
-    max_model_len = HfConfigFactory.get_max_model_len(config_dict)
-    rope_scaling = HfConfigFactory.get_config_attr(config_dict, 'rope_scaling')
+        HfConfigFactory.set_config_attr(config, 'quantization_config', quantization_config)
+    quant_info = HfConfigFactory.get_quant_info(config) or {}
+    torch_dtype = HfConfigFactory.get_torch_dtype(config, quant_info)
+    max_model_len = HfConfigFactory.get_max_model_len(config)
+    rope_scaling = HfConfigFactory.get_config_attr(config, 'rope_scaling')
 
     if model_type is None:
         model_type = _read_args_json_model_type(model_dir)
     if model_type is None:
-        architectures = HfConfigFactory.get_config_attr(config_dict, 'architectures')
+        architectures = HfConfigFactory.get_config_attr(config, 'architectures')
         model_types = get_matched_model_types(architectures)
         if len(model_types) > 1:
             raise ValueError('Please explicitly pass the model_type. For reference, '
@@ -555,9 +587,6 @@ def get_model_tokenizer(
     assert tokenizer.pad_token_id is not None
 
     if model is not None:
-        # fix seq classification task
-        pad_token_id = model.config.pad_token_id or tokenizer.pad_token_id
-        HfConfigFactory.set_model_config_attr(model, 'pad_token_id', pad_token_id)
         model.model_info = model_info
         model.model_meta = model_meta
         model.model_dir = model_dir

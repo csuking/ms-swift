@@ -19,12 +19,13 @@ swift sft \
     --gradient_accumulation_steps 4 \
     --eval_steps 50 \
     --save_steps 50 \
-    --save_total_limit 5 \
+    --save_total_limit 2 \
     --logging_steps 5 \
     --max_length 2048 \
     --output_dir output \
     --system 'You are a helpful assistant.' \
     --warmup_ratio 0.05 \
     --dataloader_num_workers 4 \
+    --dataset_num_proc 4 \
     --model_author swift \
     --model_name swift-robot
