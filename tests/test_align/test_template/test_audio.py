@@ -13,7 +13,8 @@ def _infer_model(pt_engine, system=None, messages=None, audios=None):
         messages += [{'role': 'user', 'content': '你好'}]
         resp = pt_engine.infer([{'messages': messages}], request_config=request_config)
         response = resp[0].choices[0].message.content
-        messages += [{'role': 'assistant', 'content': response}, {'role': 'user', 'content': '<audio>这段语音说了什么'}]
+        messages += [{'role': 'assistant', 'content': response}]
+        messages += [{'role': 'user', 'content': '<audio>这段语音说了什么'}]
     else:
         messages = messages.copy()
     if audios is None:
@@ -54,11 +55,20 @@ def test_step_audio_chat():
     assert response == ('是的呢，今天天气晴朗，阳光明媚，微风和煦，非常适合外出活动。天空湛蓝，白云朵朵，让人心情愉悦。希望你能好好享受这美好的一天！')
 
 
+def test_qwen2_5_omni():
+    pt_engine = PtEngine('Qwen/Qwen2.5-Omni-7B')
+    response = _infer_model(pt_engine)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine)
+    assert response == response2
+
+
 if __name__ == '__main__':
     from swift.llm import PtEngine, RequestConfig, get_template
     from swift.utils import get_logger, seed_everything
     logger = get_logger()
     # test_qwen_audio()
-    test_qwen2_audio()
+    # test_qwen2_audio()
     # test_xcomposer2d5_ol()
     # test_step_audio_chat()
+    test_qwen2_5_omni()

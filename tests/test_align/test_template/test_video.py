@@ -18,6 +18,8 @@ def _infer_model(pt_engine, system=None, messages=None, videos=None, max_tokens=
         resp = pt_engine.infer([{'messages': messages}], request_config=request_config)
         response = resp[0].choices[0].message.content
         messages += [{'role': 'assistant', 'content': response}, {'role': 'user', 'content': '<video>描述视频'}]
+    else:
+        messages = messages.copy()
     if videos is None:
         videos = ['https://modelscope-open.oss-cn-hangzhou.aliyuncs.com/images/baby.mp4']
     resp = pt_engine.infer([{'messages': messages, 'videos': videos}], request_config=request_config)
@@ -128,6 +130,31 @@ def test_qwen2_5_vl():
         'which adds a playful and endearing touch to the scene.')
 
 
+def test_qwen2_5_omni():
+    os.environ['VIDEO_MAX_PIXELS'] = str(28 * 28 * 64)
+    USE_AUDIO_IN_VIDEO = False
+    os.environ['USE_AUDIO_IN_VIDEO'] = str(USE_AUDIO_IN_VIDEO)
+    pt_engine = PtEngine('Qwen/Qwen2.5-Omni-7B')
+    system = ('You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, '
+              'capable of perceiving auditory and visual inputs, as well as generating text and speech.')
+    messages = [{'role': 'system', 'content': system}, {'role': 'user', 'content': '<video>'}]
+    videos = ['https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/draw.mp4']
+    response = _infer_model(pt_engine, messages=messages, videos=videos)
+    pt_engine.default_template.template_backend = 'jinja'
+    response2 = _infer_model(pt_engine, messages=messages, videos=videos)
+    if USE_AUDIO_IN_VIDEO:
+
+        ground_truth = ('Oh, that sounds like a really cool project! Are you using a specific app on the tablet for '
+                        "drawing? And what kind of details are you adding to the guitar? It'd be interesting to hear "
+                        'more about your creative process.')
+    else:
+        ground_truth = (
+            "Oh, that sounds like a really cool project! So, you're using a tablet to draw a guitar and a key? "
+            "That's a creative way to combine two different things. Have you thought about what you'll do "
+            'with the final drawing? Maybe could use it for a poster or something? Let me know how it turns out!')
+    assert response == response2 == ground_truth
+
+
 if __name__ == '__main__':
     from swift.llm import PtEngine, RequestConfig, get_template
     from swift.utils import get_logger, seed_everything
@@ -140,4 +167,5 @@ if __name__ == '__main__':
     # test_minicpmv()
     # test_minicpmo()
     # test_valley()
-    test_qwen2_5_vl()
+    # test_qwen2_5_vl()
+    test_qwen2_5_omni()

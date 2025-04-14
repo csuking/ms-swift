@@ -1,6 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import math
 import os
+import platform
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import List, Literal, Optional, Union
@@ -10,7 +11,7 @@ import torch.utils.checkpoint
 from transformers.training_args import TrainingArguments as HfTrainingArguments
 from transformers.training_args_seq2seq import Seq2SeqTrainingArguments as HfSeq2SeqTrainingArguments
 
-from swift.utils import get_dist_setting, get_logger, use_torchacc
+from swift.utils import get_dist_setting, get_logger, is_liger_available, use_torchacc
 from .optimizers.galore import GaLoreConfig
 
 logger = get_logger()
@@ -36,16 +37,19 @@ class TrainArgumentsMixin:
     lr_scheduler_type: str = 'cosine'
     lr_scheduler_kwargs: Optional[Union[dict, str]] = None
     report_to: List[str] = field(default_factory=lambda: ['tensorboard'])
+    dataloader_num_workers: Optional[int] = None
+    dataloader_prefetch_factor: Optional[int] = None
 
     # extra
     check_model: bool = True
     acc_strategy: Literal['token', 'seq'] = 'token'
-    train_sampler_random: bool = True
+    train_dataloader_shuffle: bool = True
 
     # torchacc
     metric_warmup_step: Optional[float] = 0
     fsdp_num: int = 1
     acc_steps: int = 1
+    use_liger_kernel: bool = False
 
     # train-eval loop args
     eval_use_evalscope: bool = False
@@ -77,6 +81,10 @@ class TrainArgumentsMixin:
         except (ImportError, AttributeError):
             pass
 
+    def _init_liger(self):
+        if self.use_liger_kernel:
+            assert is_liger_available(), 'use_liger_kernel requires liger_kernels, try `pip install liger-kernel`'
+
     def __post_init__(self):
         from swift.llm.argument.base_args.model_args import ModelArguments
         if use_torchacc():
@@ -90,7 +98,15 @@ class TrainArgumentsMixin:
         if self.gradient_checkpointing_kwargs:
             self.gradient_checkpointing_kwargs = ModelArguments.parse_to_dict(self.gradient_checkpointing_kwargs)
         self._fix_gradient_checkpointing()
-
+        self._init_liger()
+        if self.dataloader_num_workers is None:
+            if platform.system() == 'Windows':
+                self.dataloader_num_workers = 0
+            else:
+                self.dataloader_num_workers = 1
+            logger.info(f'Setting args.dataloader_num_workers: {self.dataloader_num_workers}')
+        if self.dataloader_prefetch_factor is None and self.dataloader_num_workers > 0:
+            self.dataloader_prefetch_factor = 10
         if self.eval_use_evalscope:
             try:
                 import evalscope
@@ -161,6 +177,19 @@ class GRPOArgumentsMixin:
 
     # mini-batch
     mini_batch_size: Optional[int] = None
+
+    # DAPO, https://arxiv.org/abs/2503.14476
+    dynamic_sample: bool = False
+    max_resample_times: int = 3
+    overlong_filter: bool = False
+    soft_max_length: Optional[int] = None
+    soft_cache_length: Optional[int] = None
+
+    # Dr. GRPO, https://arxiv.org/abs/2503.20783
+    scale_rewards: bool = True
+
+    # compatible with trl main branch(0.17.0.dev0)
+    wandb_log_unique_prompts: Optional[bool] = None
 
 
 @dataclass

@@ -92,6 +92,7 @@ class MLLMTemplateType:
     qwen_audio = 'qwen_audio'
     qwen2_vl = 'qwen2_vl'
     qwen2_5_vl = 'qwen2_5_vl'
+    qwen2_5_omni = 'qwen2_5_omni'
     qwen2_audio = 'qwen2_audio'
     qwen2_gme = 'qwen2_gme'
     qvq = 'qvq'
@@ -101,6 +102,7 @@ class MLLMTemplateType:
 
     llama3_1_omni = 'llama3_1_omni'
     llama3_2_vision = 'llama3_2_vision'
+    llama4 = 'llama4'
 
     llava1_5_hf = 'llava1_5_hf'
     llava1_6_mistral_hf = 'llava1_6_mistral_hf'
