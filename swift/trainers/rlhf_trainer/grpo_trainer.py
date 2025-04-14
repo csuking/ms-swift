@@ -1057,12 +1057,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         input_rewards = []
         # 0. 处理每个输入：删除 assistant 消息中的 reward 字段，并提取顶层 advantage
         for inp in inputs:
-            total_reward = 0
-            # 遍历每条消息，删除 assistant 消息中的 reward
-            for message in inp['messages']:
-                if message['role'] == 'assistant' and 'reward' in message:
-                    total_reward += message.pop('reward')
-            input_rewards.append(total_reward)
+            reward = inp.get('reward', 0.0)
+            input_rewards.append(reward)
             # 提取顶层 advantage 字段
             if 'advantage' not in inp:
                 raise ValueError("每个输入必须包含 advantage 字段")
