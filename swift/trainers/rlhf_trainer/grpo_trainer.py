@@ -42,6 +42,11 @@ from .rlhf_mixin import RLHFTrainerMixin
 from .utils import _split_into_mini_batches, patch_lora_merge, patch_lora_unmerge, round_robin
 
 try:
+    from typing import TypeAlias
+except ImportError:
+    from typing_extensions import TypeAlias
+
+try:
     from trl.extras.profiling import profiling_decorator
 except ImportError:
     raise ImportError('Please install trl: `pip install -U trl`')
@@ -1212,7 +1217,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         # Log metrics or return them
         if return_outputs:
-            metrics['completions_length'] = completions_length
+            metrics['completions_length'] = completions_length.item()
             return loss, metrics
         else:
             for key, value in metrics.items():
