@@ -38,6 +38,9 @@ class LLMModelType:
     chatglm2 = 'chatglm2'
     chatglm3 = 'chatglm3'
     glm4 = 'glm4'
+    glm4_z1 = 'glm4_z1'
+    glm4_z1_rumination = 'glm4_z1_rumination'
+
     glm_edge = 'glm_edge'
     codefuse_codegeex2 = 'codefuse_codegeex2'
     codegeex4 = 'codegeex4'
@@ -203,6 +206,7 @@ class MLLMModelType:
     got_ocr2 = 'got_ocr2'
     got_ocr2_hf = 'got_ocr2_hf'
     step_audio = 'step_audio'
+    kimi_vl = 'kimi_vl'
 
     phi3_vision = 'phi3_vision'
     phi4_multimodal = 'phi4_multimodal'

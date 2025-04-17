@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from math import ceil
 from queue import Queue
 from types import MethodType
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeAlias, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import datasets
 import numpy as np
@@ -40,6 +40,11 @@ from swift.utils import (JsonlWriter, gc_collect, get_device, get_device_count, 
 from ..mixin import SwiftMixin
 from .rlhf_mixin import RLHFTrainerMixin
 from .utils import _split_into_mini_batches, patch_lora_merge, patch_lora_unmerge, round_robin
+
+try:
+    from typing import TypeAlias
+except ImportError:
+    from typing_extensions import TypeAlias
 
 try:
     from trl.extras.profiling import profiling_decorator
@@ -1082,7 +1087,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         # Log metrics or return them
         if return_outputs:
-            metrics['completions_length'] = completions_length
+            metrics['completions_length'] = completions_length.item()
             return loss, metrics
         else:
             for key, value in metrics.items():

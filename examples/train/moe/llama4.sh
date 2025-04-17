@@ -1,14 +1,10 @@
-# 4*80GB
-# You can refer to `https://github.com/QwenLM/Qwen2.5-VL` for the meaning of the `VIDEO_MAX_PIXELS` parameter.
-nproc_per_node=4
-
+# Manually select `target_modules` to avoid 'all-linear' selecting 'router'
+NPROC_PER_NODE=4 \
+USE_HF=1 \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-NPROC_PER_NODE=$nproc_per_node \
-VIDEO_MAX_PIXELS=50176 \
-FPS_MAX_FRAMES=12 \
 swift sft \
-    --model Qwen/QVQ-72B-Preview \
-    --dataset swift/VideoChatGPT:all \
+    --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
+    --dataset 'linxy/LaTeX_OCR:full#5000' \
     --train_type lora \
     --torch_dtype bfloat16 \
     --num_train_epochs 1 \
@@ -17,9 +13,10 @@ swift sft \
     --learning_rate 1e-4 \
     --lora_rank 8 \
     --lora_alpha 32 \
-    --target_modules all-linear \
+    --target_regex '^(language_model).*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$' \
     --freeze_vit true \
-    --gradient_accumulation_steps $(expr 16 / $nproc_per_node) \
+    --gradient_accumulation_steps 4 \
+    --gradient_checkpointing true \
     --eval_steps 50 \
     --save_steps 50 \
     --save_total_limit 2 \
@@ -27,5 +24,5 @@ swift sft \
     --max_length 2048 \
     --output_dir output \
     --warmup_ratio 0.05 \
-    --dataloader_num_workers 4 \
-    --deepspeed zero3
+    --deepspeed zero3 \
+    --dataloader_num_workers 4
