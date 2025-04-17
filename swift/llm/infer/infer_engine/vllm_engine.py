@@ -288,25 +288,16 @@ class VllmEngine(InferEngine):
         kwargs = {'max_tokens': request_config.max_tokens}
         for key in ['temperature', 'top_k', 'top_p', 'repetition_penalty']:
             new_value = getattr(request_config, key)
-            if new_value is None:
-                kwargs[key] = getattr(self.generation_config, key)
-            else:
-                kwargs[key] = new_value
-
+            kwargs[key] = new_value if new_value is not None else getattr(self.generation_config, key)
         if request_config.logprobs:
-            kwargs['logprobs'] = 1
-            if request_config.top_logprobs is not None:
-                kwargs['logprobs'] = max(1, request_config.top_logprobs)
-
-        # TODO: beam search
+            kwargs['logprobs'] = max(1, request_config.top_logprobs or 1)
         for key in ['n', 'best_of', 'frequency_penalty', 'presence_penalty', 'seed']:
             kwargs[key] = getattr(request_config, key)
-
-        if kwargs.get('seed') is None:
-            kwargs['seed'] = get_seed()
+        kwargs['seed'] = kwargs.get('seed') or get_seed()
         res = SamplingParams(**kwargs)
         res.top_logprobs = request_config.top_logprobs
         return res
+
 
     @property
     def inner_model(self):
@@ -407,6 +398,7 @@ class VllmEngine(InferEngine):
         adapter_request: Optional[AdapterRequest] = None,
     ) -> List[Union[ChatCompletionResponse, Iterator[ChatCompletionStreamResponse]]]:
         if self.use_async_engine:
+            # 如果启用了 async 模式，则调用父类中的 async 推理
             return super().infer(
                 infer_requests,
                 request_config,
@@ -415,39 +407,68 @@ class VllmEngine(InferEngine):
                 use_tqdm=use_tqdm,
                 adapter_request=adapter_request,
             )
-        else:
-            request_config = deepcopy(request_config or RequestConfig())
-            if request_config.stream:
-                raise ValueError('If you want to use stream inference, you need to pass `use_async_engine` as True.')
-            if use_tqdm is None:
-                use_tqdm = len(infer_requests) > 1
-            if template is None:
-                template = self.default_template
-            template.set_mode('vllm')
-            batched_inputs, error_list = self._batch_encode(
-                infer_requests, template=template, strict=getattr(self, 'strict', True))
-            self.set_default_max_tokens(request_config, batched_inputs)
-            request_id_list = []
-            for inputs in batched_inputs:
-                request_id = random_uuid()
-                request_id_list.append(request_id)
-                generation_config = self._prepare_generation_config(request_config)
-                self._add_stop_words(generation_config, request_config, template.template_meta)
-                self._add_request(inputs, generation_config, request_id, adapter_request=adapter_request)
-            prog_bar = tqdm(total=len(batched_inputs), dynamic_ncols=True, disable=not use_tqdm)
-            outputs = {}
-            while self.engine.has_unfinished_requests():
-                step_outputs = self.engine.step()
-                for output in step_outputs:
-                    if output.finished:
-                        outputs[output.request_id] = output
-                        prog_bar.update()
-            prog_bar.close()
-            outputs = [outputs[request_id] for request_id in request_id_list]
-            return [
+
+        # 非 async 情况下的标准推理逻辑
+        request_config = deepcopy(request_config or RequestConfig())
+        if request_config.stream:
+            raise ValueError("If you want to use stream inference, you need to pass `use_async_engine=True`.")
+
+        if use_tqdm is None:
+            use_tqdm = len(infer_requests) > 1
+
+        # 使用默认模板，如果没有传入 template
+        template = deepcopy(template or self.default_template)
+        template.set_mode('vllm')
+
+        # 特殊处理：加入反思 prefix forcing 的逻辑（仅修改本次模板）
+        if hasattr(request_config, "extra_body") and request_config.extra_body.get("force_prefix_think"):
+            reflection_prefix = request_config.extra_body.get("reflection_prefix", "")
+            if hasattr(template, "template_meta"):
+                template.template_meta.response_prefix = reflection_prefix
+                print(f"\033[94m[VLLM Engine] 使用了反思 prefix forcing：{reflection_prefix}\033[0m")
+
+        # 编码 batch 输入
+        batched_inputs, error_list = self._batch_encode(
+            infer_requests, template=template, strict=getattr(self, 'strict', True))
+
+        # 设置最大生成 token
+        self.set_default_max_tokens(request_config, batched_inputs)
+
+        request_id_list = []
+        generation_config_list = []
+
+        # 准备每个 request 的采样参数，并加入推理请求
+        for inputs in batched_inputs:
+            request_id = random_uuid()
+            request_id_list.append(request_id)
+
+            generation_config = self._prepare_generation_config(request_config)
+            self._add_stop_words(generation_config, request_config, template.template_meta)
+
+            self._add_request(inputs, generation_config, request_id, adapter_request=adapter_request)
+            generation_config_list.append(generation_config)
+
+        # 等待所有推理完成
+        prog_bar = tqdm(total=len(batched_inputs), dynamic_ncols=True, disable=not use_tqdm)
+        outputs = {}
+        while self.engine.has_unfinished_requests():
+            step_outputs = self.engine.step()
+            for output in step_outputs:
+                if output.finished:
+                    outputs[output.request_id] = output
+                    prog_bar.update()
+        prog_bar.close()
+
+        # 对所有输出构造 response
+        results = []
+        for request_id, generation_config in zip(request_id_list, generation_config_list):
+            result = outputs[request_id]
+            results.append(
                 self._create_chat_completion_response(result, template, generation_config, request_id)
-                for request_id, result in zip(request_id_list, outputs)
-            ]
+            )
+
+        return results
+
 
     async def infer_async(
         self,
@@ -460,17 +481,30 @@ class VllmEngine(InferEngine):
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionStreamResponse]]:
         if not self.use_async_engine:
             raise ValueError('If you want to use `infer_async`, you need to pass `use_async_engine` as True.')
-        request_config = deepcopy(request_config or RequestConfig())
-        if template is None:
-            template = self.default_template
 
+        request_config = deepcopy(request_config or RequestConfig())
+        
+        # 使用传入 template，否则 fallback 到默认
+        template = deepcopy(template or self.default_template)
         template.set_mode('vllm')
+
+        # === 👇 prefix forcing: 根据请求动态注入反思前缀 ===
+        if hasattr(request_config, "extra_body") and request_config.extra_body.get("force_prefix_think"):
+            reflection_prefix = request_config.extra_body.get("reflection_prefix", "")
+            if hasattr(template, "template_meta"):
+                template.template_meta.response_prefix = reflection_prefix
+                BLUE = '\033[94m'
+                RESET = '\033[0m'
+                print(f"{BLUE}[VLLM Engine] async 模式启用反思 prefix forcing，反思前缀为：{reflection_prefix}{RESET}")
+
         loop = asyncio.get_running_loop()
         with torch.inference_mode():
             inputs = await loop.run_in_executor(None, template.encode, infer_request)
+
         self.set_default_max_tokens(request_config, inputs)
         generation_config = self._prepare_generation_config(request_config)
         self._add_stop_words(generation_config, request_config, template.template_meta)
+
         kwargs = {
             'template': template,
             'inputs': inputs,
@@ -479,10 +513,12 @@ class VllmEngine(InferEngine):
         }
         if pre_infer_hook:
             kwargs = pre_infer_hook(kwargs)
+
         if request_config.stream:
             return self._infer_stream_async(**kwargs)
         else:
             return await self._infer_full_async(**kwargs)
+
 
     @staticmethod
     def patch_remove_log():
