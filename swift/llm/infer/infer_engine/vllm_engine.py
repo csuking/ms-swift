@@ -292,7 +292,6 @@ class VllmEngine(InferEngine):
                 kwargs[key] = getattr(self.generation_config, key)
             else:
                 kwargs[key] = new_value
-
         if request_config.logprobs:
             kwargs['logprobs'] = 1
             if request_config.top_logprobs is not None:
@@ -306,7 +305,17 @@ class VllmEngine(InferEngine):
             kwargs['seed'] = get_seed()
         res = SamplingParams(**kwargs)
         res.top_logprobs = request_config.top_logprobs
+        # === 👇 加入反思 prefix forcing 的逻辑 ===
+        if hasattr(request_config, "extra_body") and request_config.extra_body.get("force_prefix_think"):
+            reflection_prefix = request_config.extra_body.get("reflection_prefix", "")
+            if hasattr(self, "default_template") and hasattr(self.default_template, "template_meta"):
+                self.default_template.template_meta.response_prefix = reflection_prefix
+                # 蓝色字体日志输出
+                BLUE = '\033[94m'
+                RESET = '\033[0m'
+                print(f"{BLUE}[VLLM Engine] 使用了反思 prefix forcing，反思前缀为：{reflection_prefix}{RESET}")
         return res
+
 
     @property
     def inner_model(self):
@@ -435,6 +444,8 @@ class VllmEngine(InferEngine):
                 self._add_stop_words(generation_config, request_config, template.template_meta)
                 self._add_request(inputs, generation_config, request_id, adapter_request=adapter_request)
             prog_bar = tqdm(total=len(batched_inputs), dynamic_ncols=True, disable=not use_tqdm)
+            
+            template = self.default_template     
             outputs = {}
             while self.engine.has_unfinished_requests():
                 step_outputs = self.engine.step()
@@ -471,6 +482,7 @@ class VllmEngine(InferEngine):
         self.set_default_max_tokens(request_config, inputs)
         generation_config = self._prepare_generation_config(request_config)
         self._add_stop_words(generation_config, request_config, template.template_meta)
+        template = self.default_template
         kwargs = {
             'template': template,
             'inputs': inputs,
