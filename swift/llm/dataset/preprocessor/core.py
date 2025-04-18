@@ -50,12 +50,15 @@ class RowPreprocessor:
             return
         messages = row['messages']
         assert len(messages) > 0, f'messages: {messages}'
-        # fix swift/SlimOrca
+        reward = 0.0
         for message in messages:
+            if "reward" in message:
+                reward = message.pop('reward')
             keys = set(message.keys()) - {'role', 'content'}
             for key in keys:
                 message.pop(key)
-
+        row['reward'] = reward
+        
         if messages[0]['role'] == 'system':
             messages = messages[1:]
         if messages and messages[0]['role'] == 'assistant':

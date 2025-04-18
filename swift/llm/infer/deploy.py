@@ -144,46 +144,59 @@ class SwiftDeploy(SwiftInfer):
                 setattr(request_config, key, default_val)
 
     async def create_chat_completion(self,
-                                     request: ChatCompletionRequest,
-                                     raw_request: Request,
-                                     *,
-                                     return_cmpl_response: bool = False):
-        args = self.args
-        error_msg = (await self._check_model(request) or self._check_api_key(raw_request)
-                     or self._check_max_logprobs(request))
-        if error_msg:
-            return self.create_error_response(HTTPStatus.BAD_REQUEST, error_msg)
-        infer_kwargs = self.infer_kwargs.copy()
-        adapter_path = args.adapter_mapping.get(request.model)
-        if adapter_path:
-            infer_kwargs['adapter_request'] = AdapterRequest(request.model, adapter_path)
+                                        request: ChatCompletionRequest,
+                                        raw_request: Request,
+                                        *,
+                                        return_cmpl_response: bool = False):
+            args = self.args
+            error_msg = (await self._check_model(request) or self._check_api_key(raw_request)
+                        or self._check_max_logprobs(request))
+            if error_msg:
+                return self.create_error_response(HTTPStatus.BAD_REQUEST, error_msg)
 
-        infer_request, request_config = request.parse()
-        self._set_request_config(request_config)
-        request_info = {'response': '', 'infer_request': infer_request.to_printable()}
+            # 解析 request_config
+            infer_kwargs = self.infer_kwargs.copy()
+            adapter_path = args.adapter_mapping.get(request.model)
+            if adapter_path:
+                infer_kwargs['adapter_request'] = AdapterRequest(request.model, adapter_path)
 
-        def pre_infer_hook(kwargs):
-            request_info['generation_config'] = kwargs['generation_config']
-            return kwargs
+            infer_request, request_config = request.parse()
 
-        infer_kwargs['pre_infer_hook'] = pre_infer_hook
-        try:
-            res_or_gen = await self.infer_async(infer_request, request_config, template=self.template, **infer_kwargs)
-        except Exception as e:
-            import traceback
-            logger.info(traceback.format_exc())
-            return self.create_error_response(HTTPStatus.BAD_REQUEST, str(e))
-        if request_config.stream:
+            # 从 raw_request 中提取 force_prefix_think 和 reflection_prefix 并放入 extra_body
+            extra_body = raw_request._json.get("extra_body", {})
+            if raw_request._json.get("force_prefix_think"):
+                extra_body["force_prefix_think"] = raw_request._json["force_prefix_think"]
+            if raw_request._json.get("reflection_prefix"):
+                extra_body["reflection_prefix"] = raw_request._json["reflection_prefix"]
 
-            async def _gen_wrapper():
-                async for res in res_or_gen:
-                    res = self._post_process(request_info, res, return_cmpl_response)
-                    yield f'data: {json.dumps(asdict(res), ensure_ascii=False)}\n\n'
-                yield 'data: [DONE]\n\n'
+            # 更新 request_config 的 extra_body
+            request_config.extra_body = extra_body
 
-            return StreamingResponse(_gen_wrapper(), media_type='text/event-stream')
-        else:
-            return self._post_process(request_info, res_or_gen, return_cmpl_response)
+            self._set_request_config(request_config)
+            request_info = {'response': '', 'infer_request': infer_request.to_printable()}
+
+            def pre_infer_hook(kwargs):
+                request_info['generation_config'] = kwargs['generation_config']
+                return kwargs
+
+            infer_kwargs['pre_infer_hook'] = pre_infer_hook
+            try:
+                res_or_gen = await self.infer_async(infer_request, request_config, template=self.template, **infer_kwargs)
+            except Exception as e:
+                import traceback
+                logger.info(traceback.format_exc())
+                return self.create_error_response(HTTPStatus.BAD_REQUEST, str(e))
+            if request_config.stream:
+
+                async def _gen_wrapper():
+                    async for res in res_or_gen:
+                        res = self._post_process(request_info, res, return_cmpl_response)
+                        yield f'data: {json.dumps(asdict(res), ensure_ascii=False)}\n\n'
+                    yield 'data: [DONE]\n\n'
+
+                return StreamingResponse(_gen_wrapper(), media_type='text/event-stream')
+            else:
+                return self._post_process(request_info, res_or_gen, return_cmpl_response)
 
     async def create_completion(self, request: CompletionRequest, raw_request: Request):
         chat_request = ChatCompletionRequest.from_cmpl_request(request)

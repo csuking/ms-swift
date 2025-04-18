@@ -296,6 +296,15 @@ class VllmEngine(InferEngine):
         kwargs['seed'] = kwargs.get('seed') or get_seed()
         res = SamplingParams(**kwargs)
         res.top_logprobs = request_config.top_logprobs
+        # === 👇 加入反思 prefix forcing 的逻辑 ===
+        if hasattr(request_config, "extra_body") and request_config.extra_body.get("force_prefix_think"):
+            reflection_prefix = request_config.extra_body.get("reflection_prefix", "")
+            if hasattr(self, "default_template") and hasattr(self.default_template, "template_meta"):
+                self.default_template.template_meta.response_prefix = reflection_prefix
+                # 蓝色字体日志输出
+                BLUE = '\033[94m'
+                RESET = '\033[0m'
+                print(f"{BLUE}[VLLM Engine] 使用了反思 prefix forcing，反思前缀为：{reflection_prefix}{RESET}")
         return res
 
 
