@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from math import ceil
 from queue import Queue
 from types import MethodType
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, Tuple
 from torch.utils.data import SequentialSampler
 import datasets
 import numpy as np
@@ -1156,6 +1156,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         outputs.update({
             'ref_per_token_logps': ref_per_token_logps,
             'advantages': advantages,
+            'truncated_mask': torch.tensor(
+                [inp.get('is_truncated', False) for inp in inputs], dtype=torch.bool, device=self.accelerator.device
+            ),
         })
 
         return outputs
