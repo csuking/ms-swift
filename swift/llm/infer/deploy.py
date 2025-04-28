@@ -130,8 +130,6 @@ class SwiftDeploy(SwiftInfer):
                 self.infer_stats.update(response)
             if self.jsonl_writer:
                 self.jsonl_writer.append(request_info)
-            if self.args.verbose:
-                logger.info(request_info)
         return response
 
     def _set_request_config(self, request_config) -> None:
