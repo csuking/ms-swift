@@ -107,6 +107,7 @@ class StdTemplateInputs:
     audios: List[str] = field(default_factory=list)
     videos: List[str] = field(default_factory=list)
     objects: Dict[str, List[Any]] = field(default_factory=dict)
+    delta_reward: Optional[float] = None
 
     def __post_init__(self):
         self.image_idx = 0
@@ -133,7 +134,7 @@ class StdTemplateInputs:
     @classmethod
     def from_dict(cls, inputs: Dict[str, Any]) -> 'StdTemplateInputs':
         kwargs = {}
-        for key in ['rejected_response', 'label']:
+        for key in ['rejected_response', 'label', 'delta_reward']: # ✅ 加了 delta_reward
             if key in inputs:
                 kwargs[key] = inputs[key]
         messages = inputs['messages']

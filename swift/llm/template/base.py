@@ -305,6 +305,11 @@ class Template(ProcessorMixin):
             data = locals()[f'{prefix}_encoded']
             for k, v in data.items():
                 encoded[f'{prefix}_{k}'] = v
+
+        if 'chosen_delta_reward' in encoded:
+            encoded['delta_reward'] = encoded.pop('chosen_delta_reward')
+        if 'rejected_delta_reward' in encoded:
+            encoded['delta_reward'] = encoded.pop('rejected_delta_reward')
         return encoded
 
     def _kto_encode(self, inputs: StdTemplateInputs) -> Dict[str, Any]:
@@ -424,6 +429,7 @@ class Template(ProcessorMixin):
         if self.use_megatron:
             encoded['labels'] = encoded['labels'][1:] + [-100]
             encoded['position_ids'] = list(range(len(encoded['labels'])))
+        
         return encoded
 
     def packing_row(self, row: List[Tuple[Dict[str, Any], int]]) -> Dict[str, Any]:
@@ -1062,6 +1068,12 @@ class Template(ProcessorMixin):
         encoded['input_ids'] = input_ids
         encoded['labels'] = labels
         encoded['loss_scale'] = loss_scale
+
+
+        # ✨ 新增：把 delta_reward 加进去
+        if hasattr(inputs, 'delta_reward') and inputs.delta_reward is not None:
+            encoded['delta_reward'] = inputs.delta_reward
+
         if not self.is_training:
             for k in list(encoded.keys()):
                 if k.endswith('labels'):
@@ -1230,15 +1242,20 @@ class Template(ProcessorMixin):
         return torch.concat(res, dim=dim) if res else None
 
     def _rlhf_data_collator(self,
-                            batch: List[Dict[str, Any]],
-                            *,
-                            chosen_prefix: str = 'chosen_',
-                            rejected_prefix: str = 'rejected_',
-                            padding_to: Optional[int] = None) -> Dict[str, Any]:
+                        batch: List[Dict[str, Any]],
+                        *,
+                        chosen_prefix: str = 'chosen_',
+                        rejected_prefix: str = 'rejected_',
+                        padding_to: Optional[int] = None) -> Dict[str, Any]:
         new_batch = []
         for prefix in [chosen_prefix, rejected_prefix]:
             new_batch += self._fetch_inputs_startswith(batch, prefix)
-        return self._data_collator(new_batch, padding_to=padding_to)
+        res = self._data_collator(new_batch, padding_to=padding_to)
+        # 这里加上 delta_reward
+        delta_reward = [b['delta_reward'] for b in batch if 'delta_reward' in b]
+        if delta_reward:
+            res['delta_reward'] = torch.tensor(delta_reward)
+        return res
 
     def _kto_data_collator(self, batch: List[Dict[str, Any]], *, padding_to: Optional[int] = None) -> Dict[str, Any]:
         new_batch = self._fetch_inputs_startswith(batch, 'chosen_')
@@ -1435,12 +1452,10 @@ class Template(ProcessorMixin):
                 val = inputs.get(f'{key}_ids')
             if val is not None:
                 key_upper = key.upper()
-                logger.info(f'[{key_upper}_IDS] {val}')
                 if key == 'labels' and self.mode in {'seq_cls', 'embedding'}:
                     continue
                 if isinstance(val, (list, tuple, torch.Tensor)):
                     val_str = self.safe_decode(val, **tokenizer_kwargs)
-                    logger.info(f'[{key_upper}] {val_str}')
         if inputs.get('loss_scale') is not None:
             val = inputs['loss_scale']
             logger.info(f'[LOSS_SCALE] {val}')

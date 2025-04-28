@@ -19,7 +19,7 @@ logger = get_logger()
 
 
 class RowPreprocessor:
-    standard_keys = ['messages', 'rejected_response', 'label', 'images', 'videos', 'audios', 'tools', 'objects']
+    standard_keys = ['messages', 'rejected_response', 'label', 'images', 'videos', 'audios', 'tools', 'objects', 'delta_reward']
 
     def __init__(self,
                  *,
@@ -156,7 +156,7 @@ class RowPreprocessor:
                 box[1], box[3] = box[3], box[1]
 
     def batched_preprocess(self, batched_row: Dict[str, Any], *, strict: bool,
-                           ignore_max_length_error: bool) -> Dict[str, Any]:
+                        ignore_max_length_error: bool) -> Dict[str, Any]:
         from ...template import MaxLengthError
         batched_row = dict(batched_row)
         assert len(batched_row) > 0
@@ -164,10 +164,9 @@ class RowPreprocessor:
         rows = self.batched_to_rows(batched_row)
 
         new_rows = []
-        for row in rows:
+        for old_row in rows:
             try:
-                row = self.preprocess(row)
-                # support [row1, row2, ...]
+                row = self.preprocess(old_row)
                 if row is None:
                     row = []
                 if isinstance(row, dict):
@@ -177,6 +176,8 @@ class RowPreprocessor:
                     self._check_messages(r)
                     self._check_rejected_response(r)
                     self._cast_images(r)
+                    if 'delta_reward' in old_row:
+                        r['delta_reward'] = old_row['delta_reward']
             except Exception as e:
                 if strict:
                     logger.warning('To avoid errors, you can pass `strict=False`.')

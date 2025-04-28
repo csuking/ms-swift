@@ -103,6 +103,10 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, HFDPOTrainer):
         if self.aux_loss_enabled:
             output['aux_loss'] = outputs.aux_loss
 
+        # 保留 delta_reward
+        if 'delta_reward' in batch:
+            output['delta_reward'] = batch['delta_reward']
+
         return output
 
     @staticmethod
