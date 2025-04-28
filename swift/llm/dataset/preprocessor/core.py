@@ -50,17 +50,26 @@ class RowPreprocessor:
             return
         messages = row['messages']
         assert len(messages) > 0, f'messages: {messages}'
-        # fix swift/SlimOrca
+        reward = 0.0
         for message in messages:
+            if "reward" in message:
+                reward = message.pop('reward')
             keys = set(message.keys()) - {'role', 'content'}
             for key in keys:
                 message.pop(key)
-
-        for message in messages:
-            role, content = message['role'], message['content']
-            # The terms 'tool' and 'tool_response' have the same meaning, ensuring compatibility.
-            assert role in {'system', 'user', 'tool_call', 'tool_response', 'tool', 'assistant'}, f'message: {message}'
-            assert content is not None, f'message: {message}'
+        row['reward'] = reward
+        
+        if messages[0]['role'] == 'system':
+            messages = messages[1:]
+        if messages and messages[0]['role'] == 'assistant':
+            messages = [{'role': 'user', 'content': ''}] + messages  # pretrain
+        for user_message, assistant_message in zip(messages[::2], messages[1::2]):
+            if (user_message['role'] not in {'user', 'tool'} or 'content' not in user_message
+                    or user_message['content'] is None):
+                raise ValueError(f'user_message: {user_message}')
+            if (assistant_message['role'] not in {'assistant'} or 'content' not in assistant_message
+                    or assistant_message['content'] in {'', None}):
+                raise ValueError(f'assistant_message: {assistant_message}')
 
     @staticmethod
     def _cast_images(row: Dict[str, Any]) -> None:

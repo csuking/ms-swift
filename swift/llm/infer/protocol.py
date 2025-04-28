@@ -64,6 +64,9 @@ class RequestConfig:
     frequency_penalty: float = 0.
     length_penalty: float = 1.
 
+    extra_body: Dict[str, Any] = field(default_factory=dict)
+
+
     def __post_init__(self):
         if self.stop is None:
             self.stop = []
@@ -192,6 +195,10 @@ class ChatCompletionRequest(RequestConfig, MultiModalRequestMixin, ChatCompletio
         for cls_type in [InferRequest, RequestConfig]:
             parameters = set(f.name for f in fields(cls_type))
             _data = {k: v for k, v in data.items() if k in parameters}
+            print(_data)
+            # 处理 extra_body 字段，确保它正确传递
+            if 'extra_body' in _data:
+                _data['extra_body'] = _data.get('extra_body', {})
             res.append(cls_type(**_data))
         return tuple(res)
 
