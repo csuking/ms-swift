@@ -25,6 +25,7 @@ class MLLMModelArch:
     qwen_audio = 'qwen_audio'
     qwen2_vl = 'qwen2_vl'
     qwen2_audio = 'qwen2_audio'
+    qwen2_5_omni = 'qwen2_5_omni'
 
     cogvlm = 'cogvlm'
     glm4v = 'glm4v'
@@ -32,6 +33,7 @@ class MLLMModelArch:
 
     llama3_1_omni = 'llama3_1_omni'
     llama3_2_vision = 'llama3_2_vision'
+    llama4 = 'llama4'
 
     llava_hf = 'llava_hf'
     llava_next_video_hf = 'llava_next_video_hf'
@@ -464,6 +466,13 @@ register_model_arch(
         aligner='visual.merger',
         vision_tower='visual',
     ))
+register_model_arch(
+    MultiModelKeys(
+        MLLMModelArch.qwen2_5_omni,
+        language_model='thinker.model',
+        vision_tower=['thinker.audio_tower', 'thinker.visual'],
+        generator=['talker', 'token2wav'],
+    ))
 
 register_model_arch(
     MultiModelKeys(
@@ -546,5 +555,5 @@ register_model_arch(
     ))
 
 
-def get_model_arch(arch_name: Optional[str]) -> Optional[ModelKeys]:
+def get_model_arch(arch_name: Optional[str]) -> Optional[MultiModelKeys]:
     return MODEL_ARCH_MAPPING.get(arch_name)
