@@ -122,6 +122,19 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self.offload_states = {}
         _, _, _, local_world_size = get_dist_setting()
 
+        # Add grpo_version parameter
+        self.grpo_version = getattr(args, 'grpo_version', 'standard')
+        if self.grpo_version not in ['standard', 'dynamic', 'dr', 'multi_step']:
+            raise ValueError(f"Invalid GRPO version: {self.grpo_version}. Must be one of: standard, dynamic, dr, multi_step")
+
+        # Configure GRPO version specific parameters
+        if self.grpo_version == 'dynamic':
+            self.args.dynamic_sample = True
+        elif self.grpo_version == 'dr':
+            self.args.scale_rewards = True
+        elif self.grpo_version == 'multi_step':
+            self.args.num_iterations = max(2, self.args.num_iterations)
+
         if not isinstance(reward_funcs, list):
             reward_funcs = [reward_funcs]
 
@@ -331,6 +344,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             self.resample_iterator = cyclic_iter(self.get_resample_dataloader())
         # flag indicating whether the evaluation has started
         self.eval_flag = False
+
+        # Add support for precomputed advantages
+        self.use_precomputed_advantages = getattr(args, 'use_precomputed_advantages', False)
 
     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
         if self.train_dataset is None or not hasattr(self.train_dataset, '__len__'):
@@ -830,24 +846,131 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         return inputs
 
     def _generate_and_score_completions(self, inputs: InputsType) -> InputsType:
+        """Generate completions and prepare inputs for training.
+        
+        This method supports two modes:
+        1. Standard mode (use_precomputed_advantages=False): Generates completions, computes rewards and advantages
+        2. Precomputed mode (use_precomputed_advantages=True): Uses pre-computed advantages from inputs
+        
+        Args:
+            inputs: List of input examples containing conversation messages and optionally pre-computed advantages
+            
+        Returns:
+            Prepared batch inputs ready for training
+        """
+        if self.use_precomputed_advantages:
+            # Mode 2: Use pre-computed advantages
+            input_advantages = []
+            input_rewards = []
+            
+            # Extract advantages and rewards from inputs
+            for inp in inputs:
+                reward = inp.get('reward', 0.0)
+                input_rewards.append(reward)
+                if 'advantage' not in inp:
+                    raise ValueError("Each input must contain 'advantage' field when use_precomputed_advantages=True")
+                input_advantages.append(inp['advantage'])
+                del inp['advantage']  # Remove to avoid affecting encoding
+            
+            # Convert to tensors
+            input_rewards = torch.tensor(input_rewards, dtype=torch.float32, device=self.accelerator.device)
+            input_advantages = torch.tensor(input_advantages, dtype=torch.float32, device=self.accelerator.device)
+            
+            # Handle vLLM/lmdeploy slicing if needed
+            if self.args.use_vllm or self.args.use_lmdeploy:
+                process_slice = slice(
+                    self.accelerator.process_index * len(inputs),
+                    (self.accelerator.process_index + 1) * len(inputs)
+                )
+                input_advantages = input_advantages[process_slice]
+            
+            # Prepare inputs for training
+            template = copy(self.template)
+            with self._template_context(template):
+                batched_inputs = [template.encode(infer_request) for infer_request in inputs]
+                outputs = to_device(template.data_collator(batched_inputs), self.model.device)
+            
+            # Process labels and compute logits
+            labels = outputs.pop('labels')
+            logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
+            outputs['logits_to_keep'] = logits_to_keep
+            outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
+            
+            # Compute token log probabilities
+            with torch.no_grad():
+                if self.old_policy:
+                    outputs['old_per_token_logps'] = self._get_per_token_logps(self.model, outputs)
+                else:
+                    outputs['old_per_token_logps'] = None
+                
+                if self.beta == 0.0:
+                    ref_per_token_logps = None
+                elif self.ref_model is not None:
+                    ref_per_token_logps = self._get_per_token_logps(self.ref_model, outputs)
+                else:
+                    with self.accelerator.unwrap_model(self.model).disable_adapter():
+                        ref_per_token_logps = self._get_per_token_logps(self.model, outputs)
+            
+            # Add advantages and other required fields
+            outputs.update({
+                'ref_per_token_logps': ref_per_token_logps,
+                'advantages': input_advantages,
+                'truncated_mask': torch.tensor(
+                    [inp.get('is_truncated', False) for inp in inputs], 
+                    dtype=torch.bool, 
+                    device=self.accelerator.device
+                ),
+            })
+            
+            # Log metrics
+            mode = 'eval' if self.control.should_evaluate else 'train'
+            completion_length = self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)).float().mean().item()
+            self._metrics[mode]['completion_length'].append(completion_length)
+            response_clip_ratio = torch.gt(
+                self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)),
+                self.args.max_completion_length
+            ).float().mean().item()
+            self._metrics[mode]['response_clip_ratio'].append(response_clip_ratio)
+            
+            # Log reward metrics
+            self._metrics[mode]['reward'].append(input_rewards.mean().item())
+            self._metrics[mode]['reward_std'].append(input_advantages.mean().item())
+            
+            # Log completions if needed
+            completions = [inp['messages'][-1]['content'] for inp in inputs]
+            if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
+                table = {
+                    'step': [str(self.state.global_step)] * len(input_advantages),
+                    'messages': [inp['messages'][:-1] for inp in inputs],
+                    'completion': completions,
+                }
+                self.jsonl_writer.append(table)
+                if 'wandb' in self.args.report_to and wandb.run is not None and self.accelerator.is_main_process:
+                    import pandas as pd
+                    df = pd.DataFrame(table)
+                    wandb.log({'completions': wandb.Table(dataframe=df)})
+            
+            return outputs
+            
+        else:
+            # Mode 1: Standard reward computation
+            inputs = self._generate_completions(inputs)
+            total_rewards_per_func, total_rewards, completions = self._score_completions(inputs)
+            mode = 'eval' if self.control.should_evaluate else 'train'
 
-        inputs = self._generate_completions(inputs)
-        total_rewards_per_func, total_rewards, completions = self._score_completions(inputs)
-        mode = 'eval' if self.control.should_evaluate else 'train'
+            if self.args.dynamic_sample and mode == 'train':
+                # dynamic sampling for std=0 groups
+                inputs, total_rewards, total_rewards_per_func, completions = \
+                    self._dynamic_sampling(inputs, total_rewards, total_rewards_per_func, completions)
 
-        if self.args.dynamic_sample and mode == 'train':
-            # dynamic sampling for std=0 groups
-            inputs, total_rewards, total_rewards_per_func, completions = \
-                self._dynamic_sampling(inputs, total_rewards, total_rewards_per_func, completions)
+            # Prepare final outputs with advantages and other required fields
+            batch_encoded_inputs = self._prepare_batch_inputs(inputs, total_rewards)
+            # Log metrics
+            messages = [inputs[i]['messages'][:-1] for i in range(len(inputs))]
 
-        # Prepare final outputs with advantages and other required fields
-        batch_encoded_inputs = self._prepare_batch_inputs(inputs, total_rewards)
-        # Log metrics
-        messages = [inputs[i]['messages'][:-1] for i in range(len(inputs))]
+            self._log_metrics(batch_encoded_inputs, messages, completions, total_rewards, total_rewards_per_func)
 
-        self._log_metrics(batch_encoded_inputs, messages, completions, total_rewards, total_rewards_per_func)
-
-        return batch_encoded_inputs
+            return batch_encoded_inputs
 
     def _score_completions(self, inputs: InputsType) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
         """Score completions using all reward functions
@@ -1042,287 +1165,6 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         for i, name in enumerate(reward_func_names):
             self._textual_logs['rewards'][name].extend(rewards_per_func[:, i].tolist())
 
-    def _generate_and_score_completions(self, inputs: dict[str, Union[torch.Tensor, Any]]) -> dict[str, Union[torch.Tensor, Any]]:
-        """
-        输入格式:
-        [
-            {
-                'messages': messages,  # 对话形式
-                'advantage': advantage, # 优势值（直接使用，不做分组统计）
-                'images': images,       # 图像形式
-                'audios': audios,       # 音频形式
-                'videos': videos,       # 视频形式
-            },
-            ...
-        ]
-
-        修改要求：
-        1. 禁止 inputs 复制
-        2. 直接从 inputs 中提取出 advantage，不需要计算 reward（并删除 assistant 消息中的 reward 字段）
-        3. 优势值直接赋值，保持形状不变
-        """
-
-        input_advantages = []  # 用于存储每个输入对应的 advantage
-        input_rewards = []
-        # 0. 处理每个输入：删除 assistant 消息中的 reward 字段，并提取顶层 advantage
-        for inp in inputs:
-            reward = inp.get('reward', 0.0)
-            input_rewards.append(reward)
-            # 提取顶层 advantage 字段
-            if 'advantage' not in inp:
-                raise ValueError("每个输入必须包含 advantage 字段")
-            input_advantages.append(inp['advantage'])
-            # 删除该字段，避免后续编码时影响
-            del inp['advantage']
-
-
-        input_rewards = torch.tensor(input_rewards, dtype=torch.float32, 
-                               device=self.accelerator.device)
-
-
-        # 将提取的 advantage 转换为张量，形状保持不变
-        input_advantages = torch.tensor(input_advantages, dtype=torch.float32, device=self.accelerator.device)
-        # 仅在使用 vLLM/lmdeploy 模式下，需要对全局数据做切片
-        if self.args.use_vllm or self.args.use_lmdeploy:
-            process_slice = slice(
-                self.accelerator.process_index * len(inputs),
-                (self.accelerator.process_index + 1) * len(inputs)
-            )
-        else:
-            process_slice = None
-
-        # 3. 使用更新后的 inputs 进行编码以获得输出结构（主要获得 labels 等信息）
-        from copy import copy
-        template = copy(self.template)
-        with self._template_context(template):
-            batched_inputs = [template.encode(infer_request) for infer_request in inputs]
-            outputs = to_device(template.data_collator(batched_inputs), self.model.device)
-
-        # 4. 计算 logits 等信息
-        labels = outputs.pop('labels')
-        logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
-        outputs['logits_to_keep'] = logits_to_keep
-        outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
-
-        # 5. 计算 old_per_token_logps 和 ref_per_token_logps（保持原流程）
-        with torch.no_grad():
-            if self.old_policy:
-                outputs['old_per_token_logps'] = self._get_per_token_logps(self.model, outputs)
-            else:
-                outputs['old_per_token_logps'] = None
-
-            if self.beta == 0.0:
-                ref_per_token_logps = None
-            elif self.ref_model is not None:
-                ref_per_token_logps = self._get_per_token_logps(self.ref_model, outputs)
-            else:
-                with self.accelerator.unwrap_model(self.model).disable_adapter():
-                    ref_per_token_logps = self._get_per_token_logps(self.model, outputs)
-
-        # 6. 直接使用提取的 advantage，不做分组计算，保持原始形状
-        advantages = input_advantages.clone()  # 直接赋值
-        if process_slice is not None:
-            advantages = advantages[process_slice]
-
-        # 7. 记录指标
-        mode = 'eval' if self.control.should_evaluate else 'train'
-        completion_length = self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)).float().mean().item()
-        self._metrics[mode]['completion_length'].append(completion_length)
-        response_clip_ratio = torch.gt(
-            self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)),
-            self.args.max_completion_length
-        ).float().mean().item()
-        self._metrics[mode]['response_clip_ratio'].append(response_clip_ratio)
-
-        # 记录真实reward指标
-        self._metrics[mode]['reward'].append(input_rewards.mean().item())
-        # 保持原有advantage指标
-        self._metrics[mode]['reward_std'].append(advantages.mean().item())
-
-
-        # 8. 如果需要日志记录 completions
-        completions = [inp['messages'][-1]['content'] for inp in inputs]
-        if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
-            table = {
-                'step': [str(self.state.global_step)] * len(input_advantages),
-                'messages': [inp['messages'][:-1] for inp in inputs],
-                'completion': completions,
-            }
-            self.jsonl_writer.append(table)
-            if 'wandb' in self.args.report_to and wandb.run is not None and self.accelerator.is_main_process:
-                import pandas as pd
-                df = pd.DataFrame(table)
-                wandb.log({'completions': wandb.Table(dataframe=df)})
-
-
-
-        # 9. 更新 outputs
-        outputs.update({
-            'ref_per_token_logps': ref_per_token_logps,
-            'advantages': advantages,
-            'truncated_mask': torch.tensor(
-                [inp.get('is_truncated', False) for inp in inputs], dtype=torch.bool, device=self.accelerator.device
-            ),
-        })
-
-        return outputs
-
-
-    @profiling_decorator
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        # Compute the per-token log probabilities for the model, return_outputs=True in mini-batch training
-        if isinstance(inputs, list):
-            assert len(inputs) == 1
-            inputs = inputs[0]
-        completion_mask = inputs['completion_mask']
-        truncated_mask = inputs['truncated_mask']
-        # apply the completion_mask to exclude loss and metrics for overlong completions
-        if self.args.overlong_filter and any(truncated_mask):
-            if all(truncated_mask):
-                logger.info('All completions are overlong, loss and KL will be zero')
-            truncated_mask = truncated_mask.unsqueeze(-1).expand_as(completion_mask).to(completion_mask.device)
-            completion_mask = completion_mask * (~truncated_mask)
-
-        per_token_logps = self._get_per_token_logps(model, inputs)
-
-        # Compute the KL divergence between the model and the reference model
-        if self.beta != 0.0:
-            ref_per_token_logps = inputs['ref_per_token_logps']
-            per_token_kl = (
-                torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1)
-
-        advantages = inputs['advantages']
-        old_per_token_logps = inputs['old_per_token_logps'] if self.old_policy else per_token_logps.detach()
-        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
-        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
-        per_token_loss1 = coef_1 * advantages.unsqueeze(1)
-        per_token_loss2 = coef_2 * advantages.unsqueeze(1)
-        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
-        if self.beta != 0.0:
-            per_token_loss = per_token_loss + self.beta * per_token_kl
-
-        completions_length = completion_mask.sum()
-        if completions_length == 0:
-            # Prevent division by zero issues after all completions are filtered by the overlong filter
-            completions_length = completions_length.float() + 1e-4
-        loss = (per_token_loss * completion_mask).sum() / completions_length
-
-        # Log the metrics
-        metrics = {}
-        mode = 'eval' if self.control.should_evaluate else 'train'
-
-        if self.beta != 0.0:
-            mean_kl = (per_token_kl * completion_mask).sum() / completions_length
-            metrics['kl'] = mean_kl
-
-        is_clipped = ((coef_1 < 1 - self.epsilon_low) &
-                      (advantages.unsqueeze(1) < 0)) | ((coef_1 > 1 + self.epsilon_high) &
-                                                        (advantages.unsqueeze(1) > 0))
-
-        clip_ratio = (is_clipped * completion_mask).sum() / completions_length
-        metrics['clip_ratio'] = clip_ratio
-
-        # Log metrics or return them
-        if return_outputs:
-            metrics['completions_length'] = completions_length.item()
-            return loss, metrics
-        else:
-            for key, value in metrics.items():
-                self._metrics[mode][key].append(self.accelerator.gather_for_metrics(value).mean().item())
-            return loss
-
-    # Get the per-token log probabilities for the completions for the model and the reference model
-    @profiling_decorator
-    def _get_per_token_logps(self, model, inputs):
-        from trl.trainer.utils import selective_log_softmax
-        logits_to_keep = inputs['logits_to_keep']
-        input_ids = inputs['input_ids']
-        unwrapped_model = self.accelerator.unwrap_model(model)
-        parameters = inspect.signature(unwrapped_model.forward).parameters
-        if not unwrapped_model.model_meta.is_multimodal and 'logits_to_keep' in parameters:
-            # save memory
-            return super()._get_per_token_logps(model, input_ids, inputs['attention_mask'], logits_to_keep)
-        inputs = {
-            k: v
-            for k, v in inputs.items() if k not in [
-                'logits_to_keep', 'completion_mask', 'ref_per_token_logps', 'advantages', 'old_per_token_logps',
-                'truncated_mask'
-            ]
-        }
-        with self._template_context(self.template):
-            logits = model(**inputs).logits
-        # exclude the last logit: it corresponds to the next token pred
-        logits = logits[:, -(logits_to_keep + 1):-1, :]
-        logits = logits / self.temperature
-        input_ids = input_ids[:, -logits_to_keep:]
-        return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
-
-    def evaluation_loop(self, dataloader, *args, **kwargs):
-        # Wait for the training rollout to complete
-        if self.args.async_generate:
-            while not self.is_async_generate_eval_rollout_done():
-                time.sleep(0.1)
-        # set mini_batch_size None in evaluation
-        mini_batch_size = self.args.mini_batch_size
-        self.args.mini_batch_size = None
-        if self._queue.empty() and self.args.async_generate:
-            self._prefetch(dataloader)
-        metric_key_prefix = kwargs['metric_key_prefix']
-        output = super().evaluation_loop(dataloader, *args, **kwargs)
-        metrics = {f'{metric_key_prefix}_{key}': sum(val) / len(val) for key, val in self._metrics['eval'].items()}
-        output.metrics.update(metrics)
-        self.args.mini_batch_size = mini_batch_size
-        self.eval_flag = True
-        return output
-
-    def training_step(self, model: nn.Module, inputs: InputsType, num_items_in_batch=None) -> torch.Tensor:
-        if self.args.async_generate:
-            # Wait for the eval rollout to complete
-            while not self.is_async_generate_eval_rollout_done():
-                time.sleep(0.1)
-        if self.args.mini_batch_size is None:
-            return super().training_step(model, inputs, num_items_in_batch)
-        model.train()
-        if hasattr(self.optimizer, 'train') and callable(self.optimizer.train):
-            self.optimizer.train()
-
-        batch_inputs = self._prepare_inputs(inputs)
-
-        total_loss = torch.tensor(0.0, device=batch_inputs[0]['input_ids'].device)
-        # Initialize metrics accumulators
-        total_kl = 0.0
-        total_clip_ratio = 0.0
-        total_completion_length = 0
-        for mini_batch in batch_inputs:
-
-            with self.compute_loss_context_manager():
-                mini_batch_loss, mini_batch_metrics = self.compute_loss(model, mini_batch, return_outputs=True)
-                mb_completion_length = mini_batch_metrics['completions_length']
-
-            self.accelerator.backward(mini_batch_loss)
-            # Token-level metrics are weighted by completion length to ensure a fair average over all tokens.
-            if self.beta != 0.0:
-                total_kl += mini_batch_metrics['kl'] * mb_completion_length
-            total_clip_ratio += mini_batch_metrics['clip_ratio'] * mb_completion_length
-            total_completion_length += mb_completion_length
-            total_loss += mini_batch_loss * mb_completion_length
-
-        mode = 'eval' if self.control.should_evaluate else 'train'
-        if self.beta != 0.0:
-            self._metrics[mode]['kl'].append(
-                self.accelerator.gather_for_metrics(total_kl / total_completion_length).mean().item())
-        self._metrics[mode]['clip_ratio'].append(
-            self.accelerator.gather_for_metrics(total_clip_ratio / total_completion_length).mean().item())
-
-        total_loss = total_loss / total_completion_length
-
-        del inputs, batch_inputs
-        if (self.args.torch_empty_cache_steps is not None
-                and self.state.global_step % self.args.torch_empty_cache_steps == 0):
-            gc_collect()
-
-        return total_loss.detach()
-
     def _engine_infer(
         self,
         infer_requests: List[InferRequest],
@@ -1369,6 +1211,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 max_model_len = _self.max_model_len or 8192
                 max_prompt_length = self.template.max_length
                 _self.max_model_len = min(max_model_len, max_prompt_length + request_config.max_tokens)
+                _self.set_grpo_max_model_len = True
                 _self.origin_set_default_max_tokens(request_config, inputs)
 
             self.engine.set_default_max_tokens = MethodType(new_set_default_max_tokens, self.engine)
@@ -1546,3 +1389,48 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
     def is_async_generate_train_rollout_done(self):
         return not self.train_queue.empty()
+
+    def _save_checkpoint(self, *args, **kwargs):
+        """Save checkpoint with version-specific information"""
+        self.state.last_model_checkpoint = os.path.join(self.args.output_dir, f'checkpoint-{self.state.global_step}')
+        self._fix_zero3_gather_all_parameters()
+        
+        # Save main checkpoint
+        result = super()._save_checkpoint(*args, **kwargs)
+        
+        # Save version-specific checkpoint
+        version_checkpoint_dir = os.path.join(self.args.output_dir, f'checkpoint-{self.state.global_step}-{self.grpo_version}')
+        os.makedirs(version_checkpoint_dir, exist_ok=True)
+        
+        # Save version-specific state
+        version_state = {
+            'grpo_version': self.grpo_version,
+            'global_step': self.state.global_step,
+            'model_state': self.model.state_dict(),
+            'optimizer_state': self.optimizer.state_dict() if self.optimizer else None,
+            'scheduler_state': self.lr_scheduler.state_dict() if self.lr_scheduler else None,
+        }
+        
+        torch.save(version_state, os.path.join(version_checkpoint_dir, 'version_state.pt'))
+        
+        logger.info(f'Saving model checkpoint to {self.state.last_model_checkpoint}')
+        logger.info(f'Saving version-specific checkpoint to {version_checkpoint_dir}')
+        return result
+
+    def _load_checkpoint(self, checkpoint_dir):
+        """Load checkpoint with version-specific information"""
+        # Load main checkpoint
+        super()._load_checkpoint(checkpoint_dir)
+        
+        # Try to load version-specific checkpoint
+        version_checkpoint_dir = os.path.join(checkpoint_dir, f'checkpoint-{self.state.global_step}-{self.grpo_version}')
+        if os.path.exists(version_checkpoint_dir):
+            version_state = torch.load(os.path.join(version_checkpoint_dir, 'version_state.pt'))
+            self.grpo_version = version_state['grpo_version']
+            if version_state['model_state']:
+                self.model.load_state_dict(version_state['model_state'])
+            if version_state['optimizer_state'] and self.optimizer:
+                self.optimizer.load_state_dict(version_state['optimizer_state'])
+            if version_state['scheduler_state'] and self.lr_scheduler:
+                self.lr_scheduler.load_state_dict(version_state['scheduler_state'])
+            logger.info(f'Loaded version-specific checkpoint from {version_checkpoint_dir}')
