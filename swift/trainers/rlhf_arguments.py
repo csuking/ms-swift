@@ -45,6 +45,7 @@ class PPOConfig(SwiftArgumentsMixin, HfPPOConfig):
 @dataclass
 class GRPOConfig(GRPOArgumentsMixin, SwiftArgumentsMixin, HfGRPOConfig):
     stop_words: List[str] = field(default_factory=list)
+    use_precomputed_advantages: bool = False
 
     def __post_init__(self):
         from swift.llm.argument.base_args.model_args import ModelArguments

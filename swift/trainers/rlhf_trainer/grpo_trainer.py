@@ -1165,6 +1165,161 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         for i, name in enumerate(reward_func_names):
             self._textual_logs['rewards'][name].extend(rewards_per_func[:, i].tolist())
 
+    @profiling_decorator
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        # Compute the per-token log probabilities for the model, return_outputs=True in mini-batch training
+        if isinstance(inputs, list):
+            assert len(inputs) == 1
+            inputs = inputs[0]
+        completion_mask = inputs['completion_mask']
+        truncated_mask = inputs['truncated_mask']
+        # apply the completion_mask to exclude loss and metrics for overlong completions
+        if self.args.overlong_filter and any(truncated_mask):
+            if all(truncated_mask):
+                logger.info('All completions are overlong, loss and KL will be zero')
+            truncated_mask = truncated_mask.unsqueeze(-1).expand_as(completion_mask).to(completion_mask.device)
+            completion_mask = completion_mask * (~truncated_mask)
+
+        per_token_logps = self._get_per_token_logps(model, inputs)
+
+        # Compute the KL divergence between the model and the reference model
+        if self.beta != 0.0:
+            ref_per_token_logps = inputs['ref_per_token_logps']
+            per_token_kl = (
+                torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1)
+
+        advantages = inputs['advantages']
+        old_per_token_logps = inputs['old_per_token_logps'] if self.old_policy else per_token_logps.detach()
+        coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+        coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+        per_token_loss1 = coef_1 * advantages.unsqueeze(1)
+        per_token_loss2 = coef_2 * advantages.unsqueeze(1)
+        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        if self.beta != 0.0:
+            per_token_loss = per_token_loss + self.beta * per_token_kl
+
+        completions_length = completion_mask.sum()
+        if completions_length == 0:
+            # Prevent division by zero issues after all completions are filtered by the overlong filter
+            completions_length = completions_length.float() + 1e-4
+        loss = (per_token_loss * completion_mask).sum() / completions_length
+
+        # Log the metrics
+        metrics = {}
+        mode = 'eval' if self.control.should_evaluate else 'train'
+
+        if self.beta != 0.0:
+            mean_kl = (per_token_kl * completion_mask).sum() / completions_length
+            metrics['kl'] = mean_kl
+
+        is_clipped = ((coef_1 < 1 - self.epsilon_low) &
+                      (advantages.unsqueeze(1) < 0)) | ((coef_1 > 1 + self.epsilon_high) &
+                                                        (advantages.unsqueeze(1) > 0))
+
+        clip_ratio = (is_clipped * completion_mask).sum() / completions_length
+        metrics['clip_ratio'] = clip_ratio
+
+        # Log metrics or return them
+        if return_outputs:
+            metrics['completions_length'] = completions_length.item()
+            return loss, metrics
+        else:
+            for key, value in metrics.items():
+                self._metrics[mode][key].append(self.accelerator.gather_for_metrics(value).mean().item())
+            return loss
+
+    # Get the per-token log probabilities for the completions for the model and the reference model
+    @profiling_decorator
+    def _get_per_token_logps(self, model, inputs):
+        from trl.trainer.utils import selective_log_softmax
+        logits_to_keep = inputs['logits_to_keep']
+        input_ids = inputs['input_ids']
+        unwrapped_model = self.accelerator.unwrap_model(model)
+        parameters = inspect.signature(unwrapped_model.forward).parameters
+        if not unwrapped_model.model_meta.is_multimodal and 'logits_to_keep' in parameters:
+            # save memory
+            return super()._get_per_token_logps(model, input_ids, inputs['attention_mask'], logits_to_keep)
+        inputs = {
+            k: v
+            for k, v in inputs.items() if k not in [
+                'logits_to_keep', 'completion_mask', 'ref_per_token_logps', 'advantages', 'old_per_token_logps',
+                'truncated_mask'
+            ]
+        }
+        with self._template_context(self.template):
+            logits = model(**inputs).logits
+        # exclude the last logit: it corresponds to the next token pred
+        logits = logits[:, -(logits_to_keep + 1):-1, :]
+        logits = logits / self.temperature
+        input_ids = input_ids[:, -logits_to_keep:]
+        return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
+
+    def evaluation_loop(self, dataloader, *args, **kwargs):
+        # Wait for the training rollout to complete
+        if self.args.async_generate:
+            while not self.is_async_generate_eval_rollout_done():
+                time.sleep(0.1)
+        # set mini_batch_size None in evaluation
+        mini_batch_size = self.args.mini_batch_size
+        self.args.mini_batch_size = None
+        if self._queue.empty() and self.args.async_generate:
+            self._prefetch(dataloader)
+        metric_key_prefix = kwargs['metric_key_prefix']
+        output = super().evaluation_loop(dataloader, *args, **kwargs)
+        metrics = {f'{metric_key_prefix}_{key}': sum(val) / len(val) for key, val in self._metrics['eval'].items()}
+        output.metrics.update(metrics)
+        self.args.mini_batch_size = mini_batch_size
+        self.eval_flag = True
+        return output
+
+    def training_step(self, model: nn.Module, inputs: InputsType, num_items_in_batch=None) -> torch.Tensor:
+        if self.args.async_generate:
+            # Wait for the eval rollout to complete
+            while not self.is_async_generate_eval_rollout_done():
+                time.sleep(0.1)
+        if self.args.mini_batch_size is None:
+            return super().training_step(model, inputs, num_items_in_batch)
+        model.train()
+        if hasattr(self.optimizer, 'train') and callable(self.optimizer.train):
+            self.optimizer.train()
+
+        batch_inputs = self._prepare_inputs(inputs)
+
+        total_loss = torch.tensor(0.0, device=batch_inputs[0]['input_ids'].device)
+        # Initialize metrics accumulators
+        total_kl = 0.0
+        total_clip_ratio = 0.0
+        total_completion_length = 0
+        for mini_batch in batch_inputs:
+
+            with self.compute_loss_context_manager():
+                mini_batch_loss, mini_batch_metrics = self.compute_loss(model, mini_batch, return_outputs=True)
+                mb_completion_length = mini_batch_metrics['completions_length']
+
+            self.accelerator.backward(mini_batch_loss)
+            # Token-level metrics are weighted by completion length to ensure a fair average over all tokens.
+            if self.beta != 0.0:
+                total_kl += mini_batch_metrics['kl'] * mb_completion_length
+            total_clip_ratio += mini_batch_metrics['clip_ratio'] * mb_completion_length
+            total_completion_length += mb_completion_length
+            total_loss += mini_batch_loss * mb_completion_length
+
+        mode = 'eval' if self.control.should_evaluate else 'train'
+        if self.beta != 0.0:
+            self._metrics[mode]['kl'].append(
+                self.accelerator.gather_for_metrics(total_kl / total_completion_length).mean().item())
+        self._metrics[mode]['clip_ratio'].append(
+            self.accelerator.gather_for_metrics(total_clip_ratio / total_completion_length).mean().item())
+
+        total_loss = total_loss / total_completion_length
+
+        del inputs, batch_inputs
+        if (self.args.torch_empty_cache_steps is not None
+                and self.state.global_step % self.args.torch_empty_cache_steps == 0):
+            gc_collect()
+
+        return total_loss.detach()
+
     def _engine_infer(
         self,
         infer_requests: List[InferRequest],
@@ -1416,21 +1571,3 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         logger.info(f'Saving model checkpoint to {self.state.last_model_checkpoint}')
         logger.info(f'Saving version-specific checkpoint to {version_checkpoint_dir}')
         return result
-
-    def _load_checkpoint(self, checkpoint_dir):
-        """Load checkpoint with version-specific information"""
-        # Load main checkpoint
-        super()._load_checkpoint(checkpoint_dir)
-        
-        # Try to load version-specific checkpoint
-        version_checkpoint_dir = os.path.join(checkpoint_dir, f'checkpoint-{self.state.global_step}-{self.grpo_version}')
-        if os.path.exists(version_checkpoint_dir):
-            version_state = torch.load(os.path.join(version_checkpoint_dir, 'version_state.pt'))
-            self.grpo_version = version_state['grpo_version']
-            if version_state['model_state']:
-                self.model.load_state_dict(version_state['model_state'])
-            if version_state['optimizer_state'] and self.optimizer:
-                self.optimizer.load_state_dict(version_state['optimizer_state'])
-            if version_state['scheduler_state'] and self.lr_scheduler:
-                self.lr_scheduler.load_state_dict(version_state['scheduler_state'])
-            logger.info(f'Loaded version-specific checkpoint from {version_checkpoint_dir}')
