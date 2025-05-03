@@ -313,7 +313,6 @@ class StateAccuracy(ORM):
             if state_match:
                 state = state_match.group(1).strip().lower()
                 sol = sol.strip().lower()
-                print(f"state: {state}, sol: {sol}")
                 # Calculate reward based on the new logic
                 if state == sol:
                     reward = 1.0
@@ -324,7 +323,6 @@ class StateAccuracy(ORM):
             else:
                 # If no state found in answer, consider it incorrect
                 reward = 0.0
-            print(f"reward: {reward}")
             rewards.append(reward)
         return rewards
 

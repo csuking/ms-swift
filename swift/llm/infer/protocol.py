@@ -195,7 +195,6 @@ class ChatCompletionRequest(RequestConfig, MultiModalRequestMixin, ChatCompletio
         for cls_type in [InferRequest, RequestConfig]:
             parameters = set(f.name for f in fields(cls_type))
             _data = {k: v for k, v in data.items() if k in parameters}
-            print(_data)
             # 处理 extra_body 字段，确保它正确传递
             if 'extra_body' in _data:
                 _data['extra_body'] = _data.get('extra_body', {})
