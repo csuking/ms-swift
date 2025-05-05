@@ -963,9 +963,36 @@ class Template(ProcessorMixin):
             # TODO: Optimize the Template mechanism.
             assert query_role in {'user', 'tool'}, f'query_role: {query_role}'
             assert response_role in {'assistant'}, f'response_role: {response_role}'
+            
+            # 特殊处理tool角色
             if query_role == 'tool':
-                prompt = query
-                query = ''
+                # 直接添加tool内容
+                if isinstance(query, str):
+                    res_context_list.append(query)
+                    res_context_types.append(ContextType.OTHER)
+                else:
+                    res_context_list.append(str(query))
+                    res_context_types.append(ContextType.OTHER)
+                
+                # 添加assistant角色的开始标记
+                assistant_start = "<|im_start|>assistant\n"
+                res_context_list.append(assistant_start)
+                res_context_types.append(ContextType.OTHER)
+                
+                # 处理assistant响应
+                if response is not None:
+                    res_context_list.append(response)
+                    res_context_types.append(ContextType.RESPONSE)
+                
+                # 如果有下一轮对话，添加结束标记
+                if i < n_round - 1:
+                    assistant_end = "<|im_end|>\n"
+                    res_context_list.append(assistant_end)
+                    res_context_types.append(ContextType.OTHER)
+                
+                continue  # 跳过下面的普通处理
+            
+            # 正常处理user角色或其他情况
             elif template_meta.is_post_system and i == n_round - 1:
                 prompt = template_meta.system_prompt
             else:
