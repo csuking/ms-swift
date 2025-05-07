@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 from peft import PeftModel
+from torch.utils.data import Dataset
 from transformers import PreTrainedModel
 from trl import DPOTrainer as HFDPOTrainer
 
@@ -34,6 +35,43 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, HFDPOTrainer):
         self.use_weighting = False
 
         super().__init__(model, ref_model, *_args, **kwargs)
+        if self.template.sequence_parallel_size > 1:
+            from swift.trainers.sequence_parallel import sequence_parallel
+            sequence_parallel.prepare_trainer(self)
+
+    def get_train_dataloader(self):
+        dataloader = None
+        if self.template.sequence_parallel_size > 1:
+            from swift.trainers.sequence_parallel import sequence_parallel
+            dataloader = sequence_parallel.get_dataloader(self, self.train_dataset, self._train_batch_size)
+        if dataloader is None:
+            return super().get_train_dataloader()
+        return dataloader
+
+    def get_eval_dataloader(self, eval_dataset: Optional[Dataset] = None):
+        if eval_dataset is None and self.eval_dataset is None:
+            raise ValueError('Trainer: evaluation requires an eval_dataset.')
+        eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
+        dataloader = None
+        if self.template.sequence_parallel_size > 1:
+            from swift.trainers.sequence_parallel import sequence_parallel
+            dataloader = sequence_parallel.get_dataloader(self, eval_dataset, self.args.eval_batch_size)
+        if dataloader is None:
+            return super().get_eval_dataloader(eval_dataset=eval_dataset)
+        return dataloader
+
+    def get_nll_loss(self, logits, labels):
+        if not self.is_encoder_decoder:
+            # Shift so that tokens < n predict n
+            logits = logits[..., :-1, :].contiguous()
+            labels = labels[..., 1:].contiguous()
+        # Flatten the tokens
+        loss_fct = nn.CrossEntropyLoss(ignore_index=self.label_pad_token_id)
+        logits = logits.view(-1, logits.shape[-1])
+        labels = labels.view(-1)
+        # Enable model parallelism
+        labels = labels.to(logits.device)
+        return loss_fct(logits, labels)
 
     def concatenated_forward(
         self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
@@ -74,23 +112,9 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, HFDPOTrainer):
 
         output = {}
 
-        def cross_entropy_loss(logits, labels):
-            if not self.is_encoder_decoder:
-                # Shift so that tokens < n predict n
-                logits = logits[..., :-1, :].contiguous()
-                labels = labels[..., 1:].contiguous()
-            # Flatten the tokens
-            loss_fct = nn.CrossEntropyLoss(ignore_index=self.label_pad_token_id)
-            logits = logits.view(-1, logits.shape[-1])
-            labels = labels.view(-1)
-            # Enable model parallelism
-            labels = labels.to(logits.device)
-            loss = loss_fct(logits, labels)
-            return loss
-
         if self.args.rpo_alpha is not None:
             labels = batch['concatenated_labels'].clone()
-            output['nll_loss'] = cross_entropy_loss(all_logits[:num_examples], labels[:num_examples])
+            output['nll_loss'] = self.get_nll_loss(all_logits[:num_examples], labels[:num_examples])
 
         if self.loss_type == 'ipo':
             all_logps = all_logps / size_completion

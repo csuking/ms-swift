@@ -1,7 +1,7 @@
 
 # Megatron-SWIFT Training
 
-SWIFT incorporates Megatron's parallelization techniques to accelerate the training of large models, including data parallelism, tensor parallelism, pipeline parallelism, sequence parallelism, context parallelism, and expert parallelism. It supports the pre-training and fine-tuning of models such as Qwen3, Qwen3-MoE, Llama3, and the Deepseek-R1 distillation series. For a complete list of supported models, please refer to the [Supported Models and Datasets documentation](./Supported-models-and-datasets.md).
+SWIFT incorporates Megatron's parallelization techniques to accelerate the training of large models, including data parallelism, tensor parallelism, pipeline parallelism, sequence parallelism, context parallelism, and expert parallelism. It supports the pre-training and fine-tuning of models such as Qwen3, [Qwen3-MoE](https://github.com/modelscope/ms-swift/blob/main/examples/train/megatron/qwen3_moe.sh), Qwen2.5, Llama3, and the Deepseek-R1 distillation series. For a complete list of supported models, please refer to the [Supported Models and Datasets documentation](./Supported-models-and-datasets.md).
 
 ## Environment Setup
 
@@ -108,8 +108,8 @@ The inference results are as follows:
 I am a language model developed by swift, you can call me swift-robot. How can I assist you?
 ```
 
-- More examples: such as packing and multi-machine, can be found [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/megatron).
 - For pretraining, you can use `megatron pt` instead of `megatron sft`, which will use a generative template for training.
+- **More examples**: Including packing, multi-node training, 32K context, MoE models, and pre-training, can be found [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/megatron).
 
 ## Benchmark
 The speed comparison of full-parameter training for Dense/MoE models using `megatron sft` and `swift sft` on a single machine with eight A800 GPUs is shown below. The corresponding scripts can be found [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/megatron/benchmark).
@@ -181,6 +181,7 @@ seq_length: Defaults to None, meaning it is set to `max_length`. To restrict the
 **Checkpoint Parameters**:
 
 - 🔥save: Output directory for checkpoints, default is None. During training, if this parameter is not set, it defaults to `f'megatron_output/{model_suffix}'`, e.g., `'megatron_output/Qwen2.5-7B-Instruct'`.
+  - Note: When training on multiple machines, ensure that the save paths on each node point to the same location. Otherwise, you will need to manually consolidate these weights after training.
 - 🔥save_interval: Checkpoint saving interval (steps), default is 500.
   - Note: Weights will always be saved at the end of training.
 - 🔥no_save_optim: Do not save optimizer, default is False.
@@ -219,6 +220,9 @@ seq_length: Defaults to None, meaning it is set to `max_length`. To restrict the
 - log_validation_ppl_to_tensorboard: Writes validation perplexity to TensorBoard. Default is True.
 - log_memory_to_tensorboard: Writes memory logs to TensorBoard. Default is True.
 - logging_level: Logging level. Default is None.
+- wandb_project: The name of the wandb project. Defaults to '', which means ignoring wandb.
+- wandb_exp_name: The name of the wandb experiment. Defaults to ''.
+- wandb_save_dir: The local path to save wandb results. Defaults to ''.
 
 **Evaluation Parameters**:
 

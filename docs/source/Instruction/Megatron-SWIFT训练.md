@@ -1,7 +1,7 @@
 
 # Megatron-SWIFT训练
 
-SWIFT引入了Megatron的并行技术来加速大模型的训练，包括数据并行、张量并行、流水线并行、序列并行，上下文并行，专家并行。支持Qwen3、Qwen3-MoE、Llama3、Deepseek-R1蒸馏系等模型的预训练和微调。完整支持的模型可以参考[支持的模型与数据集文档](./支持的模型和数据集.md)。
+SWIFT引入了Megatron的并行技术来加速大模型的训练，包括数据并行、张量并行、流水线并行、序列并行，上下文并行，专家并行。支持Qwen3、[Qwen3-MoE](https://github.com/modelscope/ms-swift/blob/main/examples/train/megatron/qwen3_moe.sh)、Qwen2.5、Llama3、Deepseek-R1蒸馏系等模型的预训练和微调。完整支持的模型可以参考[支持的模型与数据集文档](./支持的模型和数据集.md)。
 
 ## 环境准备
 使用Megatron-SWIFT，除了安装swift依赖外，还需要安装以下内容：
@@ -102,8 +102,8 @@ swift infer \
 I am a language model developed by swift, you can call me swift-robot. How can I assist you?
 ```
 
-- 更多案例：例如packing、多机，可以查看[这里](https://github.com/modelscope/ms-swift/tree/main/examples/train/megatron)。
 - 若要进行预训练，你可以使用`megatron pt`替代`megatron sft`，这将会使用生成式的template进行训练。
+- **更多案例**：包括packing、多机、32K上下文、MoE模型、预训练，可以查看[这里](https://github.com/modelscope/ms-swift/tree/main/examples/train/megatron)。
 
 ## Benchmark
 
@@ -174,6 +174,7 @@ I am a language model developed by swift, you can call me swift-robot. How can I
 
 **checkpoint参数**:
 - 🔥save: checkpoint的输出目录，默认None。在训练中，若未设置该参数，则默认为`f'megatron_output/{model_suffix}'`，例如`'megatron_output/Qwen2.5-7B-Instruct'`。
+  - 注意：若在多机训练时，请确保每个节点的保存路径指向相同位置。否则你需要在训练后手动集中这些权重。
 - 🔥save_interval: checkpoint保存的间隔（steps），默认为500。
   - 注意：训练结束时一定会保存权重。
 - 🔥no_save_optim: 不保存optimizer，默认为False。
@@ -209,7 +210,10 @@ I am a language model developed by swift, you can call me swift-robot. How can I
 - no_log_learning_rate_to_tensorboard: 不记录学习率到tensorboard。默认为False。
 - log_validation_ppl_to_tensorboard: 将验证困惑度写入tensorboard。默认为True。
 - log_memory_to_tensorboard: 将内存日志写入tensorboard。默认为True。
-- logging_leval: 日志级别。默认为None。
+- logging_level: 日志级别。默认为None。
+- wandb_project: wandb 项目名称。默认为''，即忽略wandb。
+- wandb_exp_name: wandb 实验名称。默认为''。
+- wandb_save_dir: 本地保存 wandb 结果的路径。默认为''。
 
 **评估参数**:
 - 🔥eval_iters: 评估的迭代次数，默认为100。
