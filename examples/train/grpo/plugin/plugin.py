@@ -316,8 +316,6 @@ class StateAccuracy(ORM):
                 # Calculate reward based on the new logic
                 if state == sol:
                     reward = 1.0
-                elif sol == 'continue' and state == 'failure':
-                    reward = 0.3
                 else:
                     reward = 0.0
             else:
