@@ -960,8 +960,39 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     import pandas as pd
                     df = pd.DataFrame(table)
                     wandb.log({'completions': wandb.Table(dataframe=df)})
+
+            # 将单个 outputs 分割成多个批次
+            mode = 'train' if self.model.training else 'eval'
+            bs = self.args.per_device_train_batch_size if mode == 'train' else self.args.per_device_eval_batch_size
+            gas = self.args.gradient_accumulation_steps if mode == 'train' else 1
             
-            return outputs
+            # 确保输入大小正确
+            assert len(inputs) == bs * gas, f'Expected {bs * gas} inputs, got {len(inputs)}'
+            
+            # 将 outputs 复制 gas 次以匹配预期的格式
+            # 或者更好的方法是将数据真正分割成多个批次
+            ga_batch_encoded_inputs = []
+            
+            # 分割数据为多个批次
+            for i in range(gas):
+                # 创建每个批次的深拷贝
+                batch_outputs = deepcopy(outputs)
+                
+                # 对于张量类型的数据，需要适当切片
+                start_idx = i * bs
+                end_idx = (i + 1) * bs
+                
+                batch_slice = slice(start_idx, end_idx)
+                
+                # 对每个张量进行切片
+                for key, value in batch_outputs.items():
+                    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.size(0) == len(inputs):
+                        batch_outputs[key] = value[batch_slice]
+                
+                ga_batch_encoded_inputs.append(batch_outputs)
+            
+            return ga_batch_encoded_inputs
+        
         else:
             # Mode 1: Standard reward computation
             inputs = self._generate_completions(inputs)

@@ -200,6 +200,9 @@ class GRPOArgumentsMixin:
     # GRPO训练模式
     use_precomputed_advantages: bool = False
 
+    # dataset
+    dataset_shuffle: Optional[bool] = True
+
 
 
 @dataclass
