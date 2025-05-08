@@ -829,9 +829,28 @@ class SelfCognitionPreprocessor(ResponsePreprocessor):
         return super().preprocess(row)
 
 
+class Qwen3SelfCognitionPreprocessor(SelfCognitionPreprocessor):
+
+    def preprocess(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        row['query'] = row['query'] + ' /no_think'
+        row['response'] = '<think>\n\n</think>\n\n' + row['response']
+        return super().preprocess(row)
+
+
+class EmptyThinkSelfCognitionPreprocessor(SelfCognitionPreprocessor):
+
+    def preprocess(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        row['response'] = '<think>\n\n</think>\n\n' + row['response']
+        return super().preprocess(row)
+
+
 register_dataset(
     DatasetMeta(
         ms_dataset_id='swift/self-cognition',
         hf_dataset_id='modelscope/self-cognition',
-        preprocess_func=SelfCognitionPreprocessor(),
+        subsets=[
+            SubsetDataset(preprocess_func=SelfCognitionPreprocessor()),
+            SubsetDataset('qwen3', preprocess_func=Qwen3SelfCognitionPreprocessor()),
+            SubsetDataset('empty_think', preprocess_func=EmptyThinkSelfCognitionPreprocessor()),
+        ],
         tags=['chat', 'self-cognition', '🔥']))

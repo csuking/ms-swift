@@ -136,12 +136,16 @@ class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideAr
             logger.info(f'Setting args.lazy_tokenize: {self.lazy_tokenize}')
 
     def __post_init__(self) -> None:
+        if self.packing and self.attn_impl != 'flash_attn':
+            logger.warning('The "packing" feature needs to be used in conjunction with "flash_attn". '
+                           'Please specify `--attn_impl flash_attn`.')
         if self.resume_from_checkpoint:
             self.resume_from_checkpoint = to_abspath(self.resume_from_checkpoint, True)
-            if self.train_type == 'full':
-                self.model = self.resume_from_checkpoint
-            else:
-                self.adapters = [self.resume_from_checkpoint]
+            if self.resume_only_model:
+                if self.train_type == 'full':
+                    self.model = self.resume_from_checkpoint
+                else:
+                    self.adapters = [self.resume_from_checkpoint]
         BaseArguments.__post_init__(self)
         Seq2SeqTrainingOverrideArguments.__post_init__(self)
         TunerArguments.__post_init__(self)
@@ -222,6 +226,9 @@ class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideAr
         if is_master():
             os.makedirs(self.output_dir, exist_ok=True)
 
+        if self.run_name is None:
+            self.run_name = self.output_dir
+
         self.training_args.output_dir = self.output_dir
-        self.training_args.run_name = self.output_dir
+        self.training_args.run_name = self.run_name
         self.training_args.logging_dir = self.logging_dir
