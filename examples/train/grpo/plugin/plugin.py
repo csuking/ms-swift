@@ -294,9 +294,41 @@ class CodeFormat(ORM):
         return rewards
 
 
+class StateAccuracy(ORM):
+    """Evaluates if the state in the answer matches the solution.
+    
+    The class checks if the state in the <answer> tag matches the solution.
+    Returns 1.0 if they match exactly, 0.3 if solution is 'continue' and prediction is 'failure',
+    and 0.0 otherwise.
+    """
+    
+    def __init__(self):
+        pass
+
+    def __call__(self, completions, solution, **kwargs) -> List[float]:
+        rewards = []
+        for content, sol in zip(completions, solution):
+            # Extract state from the answer, handling spaces around the tag
+            state_match = re.search(r'<answer>\s*(\w+)\s*</answer>', content)
+            if state_match:
+                state = state_match.group(1).strip().lower()
+                sol = sol.strip().lower()
+                # Calculate reward based on the new logic
+                if state == sol:
+                    reward = 1.0
+                else:
+                    reward = 0.0
+            else:
+                # If no state found in answer, consider it incorrect
+                reward = 0.0
+            rewards.append(reward)
+        return rewards
+
+
 orms['external_math_acc'] = MathAccuracy
 orms['external_math_format'] = MathFormat
 orms['external_countdown'] = CountdownORM
 orms['external_r1v_acc'] = MultiModalAccuracyORM
 orms['external_code_reward'] = CodeReward
 orms['external_code_format'] = CodeFormat
+orms['external_state_acc'] = StateAccuracy

@@ -196,6 +196,13 @@ class GRPOArgumentsMixin:
     vllm_server_port: int = 8000
     vllm_server_timeout: float = 120.0
     vllm_client = None
+    
+    # GRPO训练模式
+    use_precomputed_advantages: bool = False
+
+    # dataset
+    dataset_shuffle: Optional[bool] = True
+
 
 
 @dataclass
