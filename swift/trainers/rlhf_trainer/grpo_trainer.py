@@ -871,97 +871,6 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         """
         if self.use_precomputed_advantages:
             # Mode 2: Use pre-computed advantages
-            input_advantages = []
-            input_rewards = []
-            
-            # Extract advantages and rewards from inputs
-            for inp in inputs:
-                reward = inp.get('reward', 0.0)
-                input_rewards.append(reward)
-                if 'advantage' not in inp:
-                    raise ValueError("Each input must contain 'advantage' field when use_precomputed_advantages=True")
-                input_advantages.append(inp['advantage'])
-                del inp['advantage']  # Remove to avoid affecting encoding
-            
-            # Convert to tensors
-            input_rewards = torch.tensor(input_rewards, dtype=torch.float32, device=self.accelerator.device)
-            input_advantages = torch.tensor(input_advantages, dtype=torch.float32, device=self.accelerator.device)
-            
-            # Handle vLLM/lmdeploy slicing if needed
-            if self.args.use_vllm or self.args.use_lmdeploy:
-                process_slice = slice(
-                    self.accelerator.process_index * len(inputs),
-                    (self.accelerator.process_index + 1) * len(inputs)
-                )
-                input_advantages = input_advantages[process_slice]
-            
-            # Prepare inputs for training
-            template = copy(self.template)
-            with self._template_context(template):
-                batched_inputs = [template.encode(infer_request) for infer_request in inputs]
-                outputs = to_device(template.data_collator(batched_inputs), self.model.device)
-            
-            # Process labels and compute logits
-            labels = outputs.pop('labels')
-            logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
-            outputs['logits_to_keep'] = logits_to_keep
-            outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
-            
-            # Compute token log probabilities
-            with torch.no_grad():
-                if self.old_policy:
-                    outputs['old_per_token_logps'] = self._get_per_token_logps(self.model, outputs)
-                else:
-                    outputs['old_per_token_logps'] = None
-                
-                if self.beta == 0.0:
-                    ref_per_token_logps = None
-                elif self.ref_model is not None:
-                    ref_per_token_logps = self._get_per_token_logps(self.ref_model, outputs)
-                else:
-                    with self.accelerator.unwrap_model(self.model).disable_adapter():
-                        ref_per_token_logps = self._get_per_token_logps(self.model, outputs)
-            
-            # Add advantages and other required fields
-            outputs.update({
-                'ref_per_token_logps': ref_per_token_logps,
-                'advantages': input_advantages,
-                'truncated_mask': torch.tensor(
-                    [inp.get('is_truncated', False) for inp in inputs], 
-                    dtype=torch.bool, 
-                    device=self.accelerator.device
-                ),
-            })
-            
-            # Log metrics
-            mode = 'eval' if self.control.should_evaluate else 'train'
-            completion_length = self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)).float().mean().item()
-            self._metrics[mode]['completion_length'].append(completion_length)
-            response_clip_ratio = torch.gt(
-                self.accelerator.gather_for_metrics(outputs['completion_mask'].sum(1)),
-                self.args.max_completion_length
-            ).float().mean().item()
-            self._metrics[mode]['response_clip_ratio'].append(response_clip_ratio)
-            
-            # Log reward metrics
-            self._metrics[mode]['reward'].append(input_rewards.mean().item())
-            self._metrics[mode]['reward_std'].append(input_advantages.mean().item())
-            
-            # Log completions if needed
-            completions = [inp['messages'][-1]['content'] for inp in inputs]
-            if self.log_completions and self.state.global_step % self.args.logging_steps == 0:
-                table = {
-                    'step': [str(self.state.global_step)] * len(input_advantages),
-                    'messages': [inp['messages'][:-1] for inp in inputs],
-                    'completion': completions,
-                }
-                self.jsonl_writer.append(table)
-                if 'wandb' in self.args.report_to and wandb.run is not None and self.accelerator.is_main_process:
-                    import pandas as pd
-                    df = pd.DataFrame(table)
-                    wandb.log({'completions': wandb.Table(dataframe=df)})
-
-            # 将单个 outputs 分割成多个批次
             mode = 'train' if self.model.training else 'eval'
             bs = self.args.per_device_train_batch_size if mode == 'train' else self.args.per_device_eval_batch_size
             gas = self.args.gradient_accumulation_steps if mode == 'train' else 1
@@ -969,30 +878,63 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # 确保输入大小正确
             assert len(inputs) == bs * gas, f'Expected {bs * gas} inputs, got {len(inputs)}'
             
-            # 将 outputs 复制 gas 次以匹配预期的格式
-            # 或者更好的方法是将数据真正分割成多个批次
-            ga_batch_encoded_inputs = []
+            # 提取优势值
+            input_advantages = []
+            for inp in inputs:
+                if 'advantage' not in inp:
+                    raise ValueError("Each input must contain 'advantage' field when use_precomputed_advantages=True")
+                input_advantages.append(inp['advantage'])
+                del inp['advantage']  # Remove to avoid affecting encoding
             
-            # 分割数据为多个批次
-            for i in range(gas):
-                # 创建每个批次的深拷贝
-                batch_outputs = deepcopy(outputs)
+            # 转换为张量
+            input_advantages = torch.tensor(input_advantages, dtype=torch.float32, device=self.accelerator.device)
+            
+            # 直接按批次划分数据，不进行进程切片
+            gas_chunks = [inputs[i * bs:(i + 1) * bs] for i in range(gas)]
+            advantage_chunks = torch.chunk(input_advantages, gas)
+            
+            ga_batch_encoded_inputs = []
+            template = self.template
+            
+            for i, (batch, batch_advantages) in enumerate(zip(gas_chunks, advantage_chunks)):
+                # 对每个批次进行处理
+                with self._template_context(template):
+                    batch_encoded_inputs = [template.encode(infer_request) for infer_request in batch]
+                    batch_encoded_inputs = to_device(template.data_collator(batch_encoded_inputs), self.model.device)
                 
-                # 对于张量类型的数据，需要适当切片
-                start_idx = i * bs
-                end_idx = (i + 1) * bs
+                # 处理标签和计算logits
+                labels = batch_encoded_inputs.pop('labels')
+                logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
+                batch_encoded_inputs.update({
+                    'completion_mask': labels[:, -logits_to_keep:] != -100,
+                    'truncated_mask': torch.tensor(
+                        [b.get('is_truncated', False) for b in batch], 
+                        dtype=torch.bool, 
+                        device=self.model.device
+                    ),
+                    'logits_to_keep': logits_to_keep,
+                    'advantages': batch_advantages
+                })
                 
-                batch_slice = slice(start_idx, end_idx)
+                # 计算token log概率
+                with torch.no_grad():
+                    if self.old_policy:
+                        batch_encoded_inputs['old_per_token_logps'] = self._get_per_token_logps(self.model, batch_encoded_inputs)
+                    else:
+                        batch_encoded_inputs['old_per_token_logps'] = None
+                    
+                    if self.beta == 0.0:
+                        ref_per_token_logps = None
+                    elif self.ref_model is not None:
+                        ref_per_token_logps = self._get_per_token_logps(self.ref_model, batch_encoded_inputs)
+                    else:
+                        with self.accelerator.unwrap_model(self.model).disable_adapter():
+                            ref_per_token_logps = self._get_per_token_logps(self.model, batch_encoded_inputs)
+                    batch_encoded_inputs['ref_per_token_logps'] = ref_per_token_logps
                 
-                # 对每个张量进行切片
-                for key, value in batch_outputs.items():
-                    if isinstance(value, torch.Tensor) and value.dim() > 0 and value.size(0) == len(inputs):
-                        batch_outputs[key] = value[batch_slice]
-                
-                ga_batch_encoded_inputs.append(batch_outputs)
+                ga_batch_encoded_inputs.append(batch_encoded_inputs)
             
             return ga_batch_encoded_inputs
-        
         else:
             # Mode 1: Standard reward computation
             inputs = self._generate_completions(inputs)
