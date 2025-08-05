@@ -388,6 +388,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         # flag indicating whether the evaluation has started
         self.eval_flag = False
 
+        self.use_precomputed_advantages = getattr(args, 'use_precomputed_advantages', False)
+
+
     @patch_profiling_decorator
     def _prepare_inputs(self, generation_batch: dict[str, Union[torch.Tensor,
                                                                 Any]]) -> dict[str, Union[torch.Tensor, Any]]:
@@ -955,6 +958,28 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         return inputs
 
     def _generate_and_score_completions(self, inputs: InputsType) -> InputsType:
+        if self.use_precomputed_advantages:
+            # Gather all inputs across processes
+            all_inputs = gather_object(inputs)
+            # Extract advantage and reward from each input
+            def get_advantage(x):
+                return x.get('advantage', x['messages'][-1].get('advantage', 0.0))
+            def get_reward(x):
+                return x.get('reward', x['messages'][-1].get('reward', 0.0))
+            device = self.accelerator.device
+            advantages = torch.tensor([get_advantage(x) for x in all_inputs], dtype=torch.float32, device=device)
+            rewards = torch.tensor([get_reward(x) for x in all_inputs], dtype=torch.float32, device=device)
+            # Slice for this process
+            process_slice = slice(
+                self.accelerator.process_index * len(inputs),
+                (self.accelerator.process_index + 1) * len(inputs),
+            )
+            local_inputs = all_inputs[process_slice]
+            local_advantages = advantages[process_slice]
+            local_rewards = rewards[process_slice]
+            # Prepare batch inputs using external_advantages
+            batch_encoded_inputs = self._prepare_batch_inputs(local_inputs, local_rewards, external_advantages=local_advantages)
+            return batch_encoded_inputs
         if self.template.truncation_strategy == 'raise':
             inputs = self.resample_truncated_inputs(inputs)
 
@@ -1097,7 +1122,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         advantage_chunks = torch.chunk(advantages, spg)
         return spg_chunks, advantage_chunks
 
-    def _prepare_batch_inputs(self, inputs: InputsType, rewards: torch.Tensor) -> List[InputsType]:
+    def _prepare_batch_inputs(self, inputs: InputsType, rewards: torch.Tensor, external_advantages: torch.Tensor = None) -> List[InputsType]:
         """
         Prepare the final batch inputs with advantages, ref/old_policy logps and other fields for RL training.
 
@@ -1112,13 +1137,15 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             List[InputsType]: A list of prepared batch inputs, organized as [spg][bs]
         """
         # Compute advantages
-        grouped_rewards = rewards.view(-1, self.num_generations)
-        mean_grouped_rewards = grouped_rewards.mean(dim=1).repeat_interleave(self.num_generations, dim=0)
-        std_grouped_rewards = grouped_rewards.std(dim=1).repeat_interleave(self.num_generations, dim=0)
-
-        advantages = (rewards - mean_grouped_rewards)
-        if self.args.scale_rewards:
-            advantages /= (std_grouped_rewards + 1e-4)
+        if external_advantages is not None:
+            advantages = external_advantages
+        else:
+            grouped_rewards = rewards.view(-1, self.num_generations)
+            mean_grouped_rewards = grouped_rewards.mean(dim=1).repeat_interleave(self.num_generations, dim=0)
+            std_grouped_rewards = grouped_rewards.std(dim=1).repeat_interleave(self.num_generations, dim=0)
+            advantages = (rewards - mean_grouped_rewards)
+            if self.args.scale_rewards:
+                advantages /= (std_grouped_rewards + 1e-4)
         self._logs['advantages'].extend(gather(advantages).tolist())
         if any('images' in data and data['images'] is not None for data in inputs):
             self._logs['image'].extend(gather_object([inp['images'] for inp in inputs]))
@@ -1140,7 +1167,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 'completion_mask':
                 labels[:, -logits_to_keep:] != -100,
                 'truncated_mask':
-                torch.tensor([b['is_truncated'] for b in batch], dtype=torch.bool),
+                torch.tensor([b.get('is_truncated', False) for b in batch], dtype=torch.bool),
                 'logits_to_keep':
                 logits_to_keep,
                 'advantages':

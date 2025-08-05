@@ -306,6 +306,9 @@ class GRPOArgumentsMixin(VllmArguments):
     # dataset
     dataset_shuffle: Optional[bool] = True
 
+    # GRPO训练模式
+    use_precomputed_advantages: bool = False
+
 
 @dataclass
 class TrainingArguments(SwiftArgumentsMixin, HfTrainingArguments):

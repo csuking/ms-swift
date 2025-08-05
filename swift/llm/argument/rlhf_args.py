@@ -62,6 +62,9 @@ class GRPOArguments(GRPOArgumentsMixin):
 
     truncation_strategy: Literal['delete', 'left', 'right', None] = None
 
+    use_precomputed_advantages: bool = False
+
+
 
 @dataclass
 class RLHFArguments(TeacherModelArguments, GRPOArguments, PPOArguments, RewardModelArguments, RLHFArgumentsMixin,
