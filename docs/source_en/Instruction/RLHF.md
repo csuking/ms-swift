@@ -15,19 +15,27 @@ For RLHF training of text models or multimodal large models using a custom datas
 ## GRPO
 [Paper on arXiv](https://arxiv.org/abs/2402.03300)
 
-Reference the training script [here](./GRPO.md).
+Reference the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/grpo).
 
 ## DPO
 [Paper on arXiv](https://arxiv.org/abs/2305.18290)
 
 Hyperparameters:
 
-- beta: KL regularization coefficient. A larger value imposes a stronger penalty for deviation from the reference model. Default is 0.1.
+- beta: KL regularization coefficient. A larger value imposes a stronger penalty for deviating from the reference model. Default is 0.1.
+- loss_type: Variant of the DPO algorithm. You can find the available options in the [documentation](https://huggingface.co/docs/trl/main/en/dpo_trainer#loss-functions). Default is 'sigmoid'.
+- (Optional) loss_weights: Weights for mixing multiple loss functions.
 
-It is recommended to perform SFT training on the preferred answers from the preference dataset before starting DPO training to ensure the data meets the distribution requirements of the DPO algorithm.
-We also mixed SFT loss into the DPO loss for stable training. You can adjust the coefficient of SFT loss with the hyperparameter `rpo_alpha`, which defaults to `1.`.
+It is recommended to perform SFT training on the preferred responses in your preference dataset before starting DPO training. This helps ensure that the data distribution better matches the requirements of the DPO algorithm.
 
-Reference the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/dpo.sh).
+If you want to mix multiple losses (such as for [MPO](https://arxiv.org/abs/2411.10442) training), you can specify multiple loss_type values and set their weights via loss_weights.
+
+By setting the hyperparameter `rpo_alpha`, you can blend a certain proportion of SFT loss into the total loss to stabilize training. The default value is `1.`, which is equivalent to adding the 'sft' loss_type.
+
+Training script references:
+
+- [DPO script](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/dpo)
+- [MPO script](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/mpo.sh)
 
 ## RM
 [Paper on arXiv](https://arxiv.org/abs/2203.02155)
@@ -37,6 +45,18 @@ Reward Modeling stage in RLHF.
 Use the base model or instruct model trained with SFT as the foundation model. Add a value head and train it using the preference dataset to create the reward model.
 
 The weights of the added value head will be saved in `value_head.safetensors` or `value_head.bin`.
+
+The loss function for reward modeling is as follows:
+
+$
+\text{loss} = -\log \sigma \left( r^{(c)} - r^{(r)} - m \right) + \lambda \left( r^{(c)} + r^{(r)} \right)^2
+$
+
+- $r^{(c)}$: The score assigned by the model to the chosen response.
+- $r^{(r)}$: The score assigned by the model to the rejected response.
+- $\lambda$: L2 regularization coefficient that encourages the model outputs to be close to zero. It is set by the parameter `center_rewards_coefficient`, as described in [the paper](https://arxiv.org/pdf/2307.09288), and defaults to 0.
+- $m$: Margin term that encourages the model to distinguish between samples of different difficulty levels. The dataset needs to provide a `margin` column for this; by default, it is 0. This term is also introduced in [the paper](https://arxiv.org/pdf/2307.09288).
+
 
 Reference the training script [here](https://github.com/modelscope/ms-swift/tree/main/examples/train/rlhf/rm.sh).
 

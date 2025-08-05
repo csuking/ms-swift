@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.abspath('../../'))
 # -- Project information -----------------------------------------------------
 
 project = 'swift'
-copyright = '2022-2024, Alibaba ModelScope'
+copyright = '2022-2025, Alibaba ModelScope'
 author = 'ModelScope Authors'
 version_file = '../../swift/version.py'
 html_theme = 'sphinx_rtd_theme'
@@ -115,3 +115,9 @@ copybutton_prompt_is_regexp = True
 
 # Example configuration for intersphinx: refer to the Python standard library.
 intersphinx_mapping = {'https://docs.python.org/': None}
+
+myst_enable_extensions = [
+    'amsmath',
+    'dollarmath',
+    'colon_fence',
+]

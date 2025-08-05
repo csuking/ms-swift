@@ -1,22 +1,26 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import datetime as dt
+import fnmatch
+import glob
 import importlib
 import os
 import random
 import re
+import shutil
 import socket
 import subprocess
 import sys
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TypeVar
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Type, TypeVar, Union
 
+import json
 import numpy as np
 import torch
 import torch.distributed as dist
 from transformers import HfArgumentParser, enable_full_determinism, set_seed
 from transformers.utils import strtobool
 
-from .env import is_dist, is_dist_ta
+from .env import is_dist
 from .logger import get_logger
 from .np_utils import stat_array
 
@@ -124,7 +128,7 @@ def add_version_to_work_dir(work_dir: str) -> str:
     version = _get_version(work_dir)
     time = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
     sub_folder = f'v{version}-{time}'
-    if (dist.is_initialized() and is_dist()) or is_dist_ta():
+    if dist.is_initialized() and is_dist():
         obj_list = [sub_folder]
         dist.broadcast_object_list(obj_list)
         sub_folder = obj_list[0]
@@ -212,6 +216,9 @@ def read_multi_line(addi_prompt: str = '') -> str:
 
 def subprocess_run(command: List[str], env: Optional[Dict[str, str]] = None, stdout=None, stderr=None):
     # stdoutm stderr: e.g. subprocess.PIPE.
+    import shlex
+    command_str = ' '.join(shlex.quote(a) for a in command)
+    logger.info(f'Run the command: `{command_str}`')
     resp = subprocess.run(command, env=env, stdout=stdout, stderr=stderr)
     resp.check_returncode()
     return resp
@@ -247,6 +254,68 @@ def find_free_port(start_port: Optional[int] = None, retry: int = 100) -> int:
     return port
 
 
+def copy_files_by_pattern(source_dir, dest_dir, patterns, exclude_patterns=None):
+    if not os.path.exists(dest_dir):
+        os.makedirs(dest_dir)
+
+    if isinstance(patterns, str):
+        patterns = [patterns]
+
+    if exclude_patterns is None:
+        exclude_patterns = []
+    elif isinstance(exclude_patterns, str):
+        exclude_patterns = [exclude_patterns]
+
+    def should_exclude_file(file_path, file_name):
+        for exclude_pattern in exclude_patterns:
+            if fnmatch.fnmatch(file_name, exclude_pattern):
+                return True
+            rel_file_path = os.path.relpath(file_path, source_dir)
+            if fnmatch.fnmatch(rel_file_path, exclude_pattern):
+                return True
+        return False
+
+    for pattern in patterns:
+        pattern_parts = pattern.split(os.path.sep)
+        if len(pattern_parts) > 1:
+            subdir_pattern = os.path.sep.join(pattern_parts[:-1])
+            file_pattern = pattern_parts[-1]
+
+            for root, dirs, files in os.walk(source_dir):
+                rel_path = os.path.relpath(root, source_dir)
+                if rel_path == '.' or (rel_path != '.' and not fnmatch.fnmatch(rel_path, subdir_pattern)):
+                    continue
+
+                for file in files:
+                    if fnmatch.fnmatch(file, file_pattern):
+                        file_path = os.path.join(root, file)
+
+                        if should_exclude_file(file_path, file):
+                            continue
+
+                        target_dir = os.path.join(dest_dir, rel_path)
+                        if not os.path.exists(target_dir):
+                            os.makedirs(target_dir)
+                        dest_file = os.path.join(target_dir, file)
+
+                        if not os.path.exists(dest_file):
+                            shutil.copy2(file_path, dest_file)
+        else:
+            search_path = os.path.join(source_dir, pattern)
+            matched_files = glob.glob(search_path)
+
+            for file_path in matched_files:
+                if os.path.isfile(file_path):
+                    file_name = os.path.basename(file_path)
+
+                    if should_exclude_file(file_path, file_name):
+                        continue
+
+                    destination = os.path.join(dest_dir, file_name)
+                    if not os.path.exists(destination):
+                        shutil.copy2(file_path, destination)
+
+
 def split_list(ori_list, num_shards):
     idx_list = np.linspace(0, len(ori_list), num_shards + 1)
     shard = []
@@ -278,3 +347,22 @@ def import_external_file(file_path: str):
     assert os.path.isdir(py_dir), f'py_dir: {py_dir}'
     sys.path.insert(0, py_dir)
     return importlib.import_module(py_file.split('.', 1)[0])
+
+
+def json_parse_to_dict(value: Union[str, Dict, None], strict: bool = True) -> Union[str, Dict]:
+    """Convert a JSON string or JSON file into a dict"""
+    # If the value could potentially be a string, it is generally advisable to set strict to False.
+    if value is None:
+        value = {}
+    elif isinstance(value, str):
+        if os.path.exists(value):  # local path
+            with open(value, 'r', encoding='utf-8') as f:
+                value = json.load(f)
+        else:  # json str
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                if strict:
+                    logger.error(f"Unable to parse string: '{value}'")
+                    raise
+    return value

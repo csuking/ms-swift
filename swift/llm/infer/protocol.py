@@ -8,7 +8,9 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
+import json
 from PIL import Image
+from pydantic import BaseModel
 
 from ..template import InferRequest
 from ..utils import Messages, Tool
@@ -61,6 +63,8 @@ class RequestConfig:
     presence_penalty: float = 0.
     frequency_penalty: float = 0.
     length_penalty: float = 1.
+    # Return token_ids additionally (non-stream)
+    return_details: bool = False
 
     def __post_init__(self):
         if self.stop is None:
@@ -71,6 +75,13 @@ class RequestConfig:
 class CompletionRequestMixin:
     model: str
     prompt: str
+
+
+@dataclass
+class EmbeddingRequestMixin:
+    input: str
+    model: str
+    encoding_format: Literal['float', 'base64'] = 'float'
 
 
 @dataclass
@@ -141,6 +152,23 @@ class CompletionRequest(RequestConfig, MultiModalRequestMixin, CompletionRequest
 
 
 @dataclass
+class EmbeddingRequest(RequestConfig, MultiModalRequestMixin, EmbeddingRequestMixin):
+
+    def __post_init__(self):
+        RequestConfig.__post_init__(self)
+        MultiModalRequestMixin.__post_init__(self)
+
+    def parse(self) -> Tuple['InferRequest', 'RequestConfig']:
+        data = asdict(self)
+        res = []
+        for cls_type in [InferRequest, RequestConfig]:
+            parameters = set(f.name for f in fields(cls_type))
+            _data = {k: v for k, v in data.items() if k in parameters}
+            res.append(cls_type(**_data))
+        return tuple(res)
+
+
+@dataclass
 class ChatCompletionRequest(RequestConfig, MultiModalRequestMixin, ChatCompletionRequestMixin):
 
     def __post_init__(self):
@@ -194,10 +222,15 @@ class ChatCompletionRequest(RequestConfig, MultiModalRequestMixin, ChatCompletio
         return tuple(res)
 
     @classmethod
-    def from_cmpl_request(cls, cmpl_request: CompletionRequest) -> 'ChatCompletionRequest':
+    def from_cmpl_request(cls, cmpl_request: Union[CompletionRequest, EmbeddingRequest]) -> 'ChatCompletionRequest':
         cmpl_request = asdict(cmpl_request)
-        prompt = cmpl_request.pop('prompt')
+        if 'prompt' in cmpl_request:
+            prompt = cmpl_request.pop('prompt')
+        else:
+            prompt = cmpl_request.pop('input')
         cmpl_request['messages'] = [{'role': 'user', 'content': prompt}]
+        if 'encoding_format' in cmpl_request:
+            cmpl_request.pop('encoding_format')
         return cls(**cmpl_request)
 
 
@@ -212,6 +245,12 @@ class UsageInfo:
 class Function:
     name: str
     arguments: Optional[str]
+
+    def __post_init__(self):
+        if not isinstance(self.arguments, str):
+            self.arguments = json.dumps(self.arguments)
+        self.name = self.name.strip()
+        self.arguments = self.arguments.strip()
 
 
 @dataclass
@@ -234,11 +273,44 @@ class ChatCompletionResponseChoice:
     message: ChatMessage
     finish_reason: Literal['stop', 'length', None]
     logprobs: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    token_ids: Optional[List[int]] = None
 
     def to_cmpl_choice(self) -> 'CompletionResponseChoice':
         self = deepcopy(self)
         assert not self.message.tool_calls, f'message: {self.message}'
         return CompletionResponseChoice(self.index, self.message.content, self.finish_reason, self.logprobs)
+
+
+@dataclass
+class EmbeddingResponseData:
+    object: str = 'embedding'
+    index: int = 0
+    embedding: List[str] = field(default_factory=lambda: [])
+
+
+@dataclass
+class EmbeddingResponse:
+    model: str
+    data: List[EmbeddingResponseData]
+    usage: UsageInfo
+    id: str = field(default_factory=lambda: f'chatcmpl-{random_uuid()}')
+    object: str = 'list'
+    created: int = field(default_factory=lambda: int(time.time()))
+
+
+@dataclass
+class RolloutResponseChoice(ChatCompletionResponseChoice):
+    messages: Optional[Messages] = None
+    images: Optional[List[str]] = None
+    multi_turn_infos: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GymRolloutResponseChoice(RolloutResponseChoice):
+    trajectory_id: str = None
+    total_reward: float = 0.0
+    step_rewards: List[float] = None
+    trajectory_info: List[Dict[str, Any]] = None
 
 
 @dataclass
@@ -252,11 +324,12 @@ class CompletionResponseChoice:
 @dataclass
 class ChatCompletionResponse:
     model: str
-    choices: List[ChatCompletionResponseChoice]
+    choices: List[Union[ChatCompletionResponseChoice, RolloutResponseChoice, GymRolloutResponseChoice]]
     usage: UsageInfo
     id: str = field(default_factory=lambda: f'chatcmpl-{random_uuid()}')
     object: str = 'chat.completion'
     created: int = field(default_factory=lambda: int(time.time()))
+    prompt_token_ids: Optional[List[int]] = None
 
     def to_cmpl_response(self) -> 'CompletionResponse':
         self = deepcopy(self)
@@ -327,3 +400,16 @@ class CompletionStreamResponse:
     id: str = field(default_factory=lambda: f'cmpl-{random_uuid()}')
     object: str = 'text_completion.chunk'
     created: int = field(default_factory=lambda: int(time.time()))
+
+
+class InitCommunicatorRequest(BaseModel):
+    host: str
+    port: int
+    world_size: int
+    client_device_uuid: Optional[str] = None
+
+
+class UpdateWeightsRequest(BaseModel):
+    name: str
+    dtype: str
+    shape: list[int]

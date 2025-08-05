@@ -1,7 +1,9 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import math
 import os
 import platform
 import re
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from functools import partial
@@ -18,11 +20,11 @@ from transformers.utils import (is_torch_bf16_gpu_available, is_torch_cuda_avail
                                 is_torch_npu_available, strtobool)
 from transformers.utils.versions import require_version
 
-from swift.utils import get_dist_setting, get_logger, is_mp, is_unsloth_available, patch_getattr, use_torchacc
+from swift.utils import get_dist_setting, get_logger, is_mp, is_unsloth_available, patch_getattr
 from .constant import ModelType
 from .patcher import (patch_automodel, patch_automodel_for_sequence_classification, patch_get_dynamic_module,
-                      patch_mp_ddp)
-from .utils import AttnImpl, HfConfigFactory, ModelInfo, safe_snapshot_download
+                      patch_mp_ddp, patch_tp_plan)
+from .utils import AttnImpl, HfConfigFactory, InitModelStrategy, ModelInfo, safe_snapshot_download
 
 GetModelTokenizerFunction = Callable[..., Tuple[Optional[PreTrainedModel], PreTrainedTokenizerBase]]
 logger = get_logger()
@@ -48,8 +50,7 @@ class ModelGroup:
     tags: List[str] = field(default_factory=list)
 
     def __post_init__(self):
-        if not isinstance(self.models, (tuple, list)):
-            self.models = [self.models]
+        assert isinstance(self.models, (tuple, list)), f'self.models: {self.models}'
 
 
 @dataclass
@@ -72,7 +73,7 @@ class ModelMeta:
     task_type: Optional[str] = None
 
     # File patterns to ignore when downloading the model.
-    ignore_patterns: List[str] = field(default_factory=list)
+    ignore_patterns: Optional[List[str]] = None
     # Usually specifies the version limits of transformers.
     requires: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
@@ -134,16 +135,40 @@ def load_by_unsloth(args):
     os.environ['UNSLOTH_DISABLE_STATISTICS'] = '1'
     model_info = args.model_info
     model_meta = args.model_meta
-    if model_meta.is_multimodal:
-        from unsloth import FastVisionModel as UnslothModel
-    else:
-        from unsloth import FastLanguageModel as UnslothModel
-    model, processor = UnslothModel.from_pretrained(
-        model_name=args.adapters and args.adapters[0] or args.model_dir,
-        dtype=args.torch_dtype,
-        max_seq_length=args.max_length,
-        load_in_4bit=args.quant_bits == 4,
-    )
+
+    os.environ['UNSLOTH_IS_PRESENT'] = '1'
+
+    @contextmanager
+    def _patch_distributed_function():
+        from unsloth_zoo import utils, compiler
+
+        def distributed_function(n=1, function=None, *args, **kwargs):
+            return function(*args, **kwargs)
+
+        _origin_distributed_function = utils.distributed_function
+        utils.distributed_function = distributed_function
+        compiler.distributed_function = distributed_function
+        yield
+        utils.distributed_function = _origin_distributed_function
+        compiler.distributed_function = _origin_distributed_function
+
+    with _patch_distributed_function():
+        if model_meta.is_multimodal:
+            from unsloth import FastVisionModel as UnslothModel
+        elif model_info.is_moe_model:
+            from unsloth import FastModel as UnslothModel
+        else:
+            from unsloth import FastLanguageModel as UnslothModel
+
+        model, processor = UnslothModel.from_pretrained(
+            model_name=args.adapters and args.adapters[0] or args.model_dir,
+            dtype=args.torch_dtype,
+            max_seq_length=args.max_length,
+            full_finetuning=args.train_type == 'full',
+            load_in_4bit=args.quant_bits == 4,
+            load_in_8bit=args.quant_bits == 8,
+            device_map=args.device_map,
+        )
     if isinstance(model, PeftModel):
         base_model = model.model
     else:
@@ -200,17 +225,22 @@ def get_model_tokenizer_from_local(model_dir: str,
     model_config.torch_dtype = torch_dtype
     HfConfigFactory.compat_zero3(model_config)
     rope_scaling = kwargs.get('rope_scaling')
+    max_model_len = kwargs.get('max_model_len')
     if rope_scaling:
         HfConfigFactory.set_config_attr(model_config, 'rope_scaling', rope_scaling)
+    if max_model_len:
+        HfConfigFactory.set_max_model_len(model_config, max_model_len)
 
     if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
 
     num_labels = model_info.num_labels or getattr(model_config, 'num_labels', None)
-    if num_labels and model_info.task_type == 'seq_cls':
+    if num_labels and model_info.task_type in ['seq_cls', 'reranker']:
         model_info.num_labels = num_labels
         model_config.num_labels = num_labels
 
+    if model_info.quant_method == 'fp8':
+        torch_dtype = 'auto'
     model = None
     if load_model:
         _patch_awq_compat(model_info)
@@ -222,12 +252,31 @@ def get_model_tokenizer_from_local(model_dir: str,
                     model_dir, config=model_config, torch_dtype=torch_dtype, trust_remote_code=True, **model_kwargs)
             except ValueError:
                 model = None
+        elif model_info.task_type == 'reranker' and automodel_class is None:
+            try:
+                model = AutoModelForSequenceClassification.from_pretrained(
+                    model_dir, config=model_config, torch_dtype=torch_dtype, trust_remote_code=True, **model_kwargs)
+            except ValueError:
+                model = None
 
         automodel_class = automodel_class or AutoModelForCausalLM
         model_meta = kwargs['model_meta']
         if model is None:
             if model_info.task_type == 'seq_cls' and not model_meta.is_reward:
                 context = partial(patch_automodel_for_sequence_classification, model_meta=model_meta)
+            elif model_info.task_type == 'seq_cls' and model_meta.is_reward and model_config.num_labels > 1:
+                logger.warning('You are using a reward model for seq_cls task and num_labels > 1, '
+                               'ignore_mismatched_sizes will be set to True')
+                model_kwargs['ignore_mismatched_sizes'] = True
+                context = partial(patch_automodel_for_sequence_classification, model_meta=model_meta)
+            elif model_info.task_type == 'reranker':
+                # For reranker task, patch CausalLM to SequenceClassification with num_labels=1
+                logger.info('Converting CausalLM to SequenceClassification for reranker task with num_labels=1')
+                context = partial(patch_automodel_for_sequence_classification, model_meta=model_meta)
+            elif model_info.task_type == 'generative_reranker':
+                # For generative reranker, keep CausalLM structure unchanged
+                logger.info('Loading model as CausalLM for generative_reranker task')
+                context = partial(patch_automodel, automodel_class=automodel_class, model_info=model_info)
             else:
                 context = partial(patch_automodel, automodel_class=automodel_class, model_info=model_info)
             with context():
@@ -244,11 +293,26 @@ def get_model_tokenizer_from_local(model_dir: str,
             from swift.llm.model.patcher import patch_output_normalizer
             patch_output_normalizer(model, model_meta=model_meta)
 
+        init_strategy = kwargs.get('init_strategy')
+        if init_strategy is not None:
+            InitModelStrategy.init_parameters(model, init_strategy)
+
     model_info.config = model_config if model is None else model.config
-    if model:
+
+    pad_token = tokenizer.pad_token_id
+    if pad_token is None:
+        pad_token = tokenizer.eos_token_id
+    if tokenizer.eos_token_id is None:
+        tokenizer.eos_token_id = pad_token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = pad_token
+    assert tokenizer.eos_token_id is not None
+    assert tokenizer.pad_token_id is not None
+
+    if model is not None:
         # fix seq classification task
-        pad_token_id = model.config.pad_token_id or tokenizer.pad_token_id
-        HfConfigFactory.set_model_config_attr(model, 'pad_token_id', pad_token_id)
+        HfConfigFactory.set_model_config_attr(model, 'pad_token_id', pad_token)
+
     return model, tokenizer
 
 
@@ -413,6 +477,7 @@ def _get_model_info(model_dir: str, model_type: Optional[str], quantization_conf
     torch_dtype = HfConfigFactory.get_torch_dtype(config, quant_info)
     max_model_len = HfConfigFactory.get_max_model_len(config)
     rope_scaling = HfConfigFactory.get_config_attr(config, 'rope_scaling')
+    is_moe_model = HfConfigFactory.is_moe_model(config)
 
     if model_type is None:
         model_type = _read_args_json_model_type(model_dir)
@@ -434,7 +499,9 @@ def _get_model_info(model_dir: str, model_type: Optional[str], quantization_conf
         max_model_len,
         quant_info.get('quant_method'),
         quant_info.get('quant_bits'),
-        rope_scaling=rope_scaling)
+        rope_scaling=rope_scaling,
+        is_moe_model=is_moe_model,
+    )
     return res
 
 
@@ -467,7 +534,7 @@ def get_model_info_meta(
     if model_type is None and model_info.model_type is not None:
         model_type = model_info.model_type
         logger.info(f'Setting model_type: {model_type}')
-    if model_meta is None and model_type is not None:
+    if model_type is not None:
         model_meta = MODEL_MAPPING[model_type]
     if model_meta is None:
         model_meta = ModelMeta(None, [], 'dummy', get_model_tokenizer_from_local, model_arch=None)
@@ -484,10 +551,21 @@ def get_model_info_meta(
             task_type = 'causal_lm'
         else:
             task_type = 'seq_cls'
-        if task_type == 'seq_cls':
-            assert num_labels is not None, 'Please pass the parameter `num_labels`.'
         if model_meta.task_type is not None:
             task_type = model_meta.task_type
+
+    # Handle reranker task type
+    if task_type == 'reranker':
+        if num_labels is None:
+            num_labels = 1  # Default to 1 for reranker tasks
+        logger.info(f'Setting reranker task with num_labels={num_labels}')
+    elif task_type == 'generative_reranker':
+        # Generative reranker doesn't need num_labels as it uses CausalLM structure
+        num_labels = None
+        logger.info('Setting generative_reranker task (no num_labels needed)')
+    elif task_type == 'seq_cls':
+        assert num_labels is not None, 'Please pass the parameter `num_labels`.'
+
     model_info.task_type = task_type
     model_info.num_labels = num_labels
 
@@ -510,10 +588,12 @@ def get_model_tokenizer(
         model_type: Optional[str] = None,
         quantization_config=None,
         max_memory: Union[str, Dict[str, Any]] = None,
-        attn_impl: Literal['flash_attn', 'sdpa', 'eager', None] = None,
+        attn_impl: Optional[str] = None,
+        new_special_tokens: Optional[List[str]] = None,
         rope_scaling: Optional[Dict[str, Any]] = None,
+        max_model_len: Optional[int] = None,
         automodel_class=None,
-        task_type: Literal['causal_lm', 'seq_cls'] = None,
+        task_type: Literal['causal_lm', 'seq_cls', 'reranker', 'generative_reranker'] = None,
         num_labels: Optional[int] = None,
         model_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs) -> Tuple[Optional[PreTrainedModel], PreTrainedTokenizerBase]:
@@ -529,7 +609,8 @@ def get_model_tokenizer(
         If set to None : It will be automatically selected between sdpa and eager.
     download_model: Whether to download the model weights. If `None`, it will be selected based on load_model.
     """
-    patch_mp_ddp()
+    if load_model:
+        patch_mp_ddp()
     if model_kwargs is None:
         model_kwargs = {}
     if download_model is None:
@@ -547,7 +628,7 @@ def get_model_tokenizer(
         task_type=task_type,
         num_labels=num_labels)
 
-    if not use_torchacc() and device_map is None:
+    if device_map is None:
         device_map = get_default_device_map()
     model_kwargs['device_map'] = device_map
     if quantization_config:
@@ -560,7 +641,8 @@ def get_model_tokenizer(
     kwargs['attn_impl'] = attn_impl
     kwargs['rope_scaling'] = rope_scaling
     kwargs['model_meta'] = model_meta
-    with patch_get_dynamic_module():
+    kwargs['max_model_len'] = max_model_len
+    with patch_get_dynamic_module(), patch_tp_plan(load_model):
         model, processor = get_function(model_dir, model_info, model_kwargs, load_model, **kwargs)
 
     if not isinstance(processor, PreTrainedTokenizerBase) and hasattr(processor, 'tokenizer'):
@@ -568,6 +650,16 @@ def get_model_tokenizer(
         patch_getattr(processor.__class__, 'tokenizer')
     else:
         tokenizer = processor
+    if new_special_tokens:
+        num_new_tokens = tokenizer.add_special_tokens({'additional_special_tokens': new_special_tokens})
+        if num_new_tokens > 0:
+            logger.info(f'Added {num_new_tokens} new special tokens.')
+            if model is not None and model.config.vocab_size < len(tokenizer):
+                vocab_size = math.ceil(len(tokenizer) / 128) * 128
+                model.resize_token_embeddings(vocab_size)
+                # fix transformers==4.52.4 qwen2.5-vl
+                model.config.vocab_size = vocab_size
+
     problem_type = kwargs.get('problem_type')
     if problem_type is None and model_info.num_labels == 1:
         problem_type = 'regression'
@@ -575,16 +667,6 @@ def get_model_tokenizer(
         model_info.config.problem_type = problem_type
     tokenizer.model_info = model_info
     tokenizer.model_meta = model_meta
-
-    pad_token = tokenizer.pad_token_id
-    if pad_token is None:
-        pad_token = tokenizer.eos_token_id
-    if tokenizer.eos_token_id is None:
-        tokenizer.eos_token_id = pad_token
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token_id = pad_token
-    assert tokenizer.eos_token_id is not None
-    assert tokenizer.pad_token_id is not None
 
     if model is not None:
         model.model_info = model_info

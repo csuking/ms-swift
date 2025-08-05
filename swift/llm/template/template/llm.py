@@ -8,7 +8,7 @@ from ..register import TemplateMeta, register_template
 from ..utils import Prompt
 from .llama import Llama3_2TemplateMeta
 from .qwen import Qwen2VLTemplate, QwenTemplateMeta
-from .utils import DEFAULT_SYSTEM, ChatmlTemplateMeta
+from .utils import DEFAULT_SYSTEM, ChatmlTemplateMeta, ThinkingWithAnswerTemplate
 
 register_template(
     TemplateMeta(
@@ -32,6 +32,8 @@ register_template(
     ))
 
 register_template(QwenTemplateMeta(MLLMTemplateType.qwen2_gme, template_cls=Qwen2VLTemplate, suffix=['<|endoftext|>']))
+register_template(
+    TemplateMeta(LLMTemplateType.qwen3_emb, suffix=['<|endoftext|>'], prefix=[], chat_sep=[], prompt=['{{QUERY}}']))
 
 register_template(
     TemplateMeta(LLMTemplateType.baichuan, prefix=['{{SYSTEM}}'], prompt=[[195], '{{QUERY}}', [196]], chat_sep=[]))
@@ -272,3 +274,40 @@ register_template(
         chat_sep=[],
         suffix=['<|endoftext|>'],
     ))
+
+register_template(
+    QwenTemplateMeta(
+        LLMTemplateType.mimo_rl,
+        default_system='You are MiMo, an AI assistant developed by Xiaomi.',
+    ))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.dots1,
+        prefix=['<|system|>{{SYSTEM}}<|endofsystem|>'],
+        prompt=['<|userprompt|>{{QUERY}}<|endofuserprompt|><|response|>'],
+        chat_sep=['<|endofresponse|>'],
+        suffix=['<|endofresponse|>'],
+        default_system='You are a helpful assistant.',
+    ))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.hunyuan_moe,
+        prefix=['<|startoftext|>'],
+        system_prefix=['<|startoftext|>{{SYSTEM}}<|extra_4|>'],
+        prompt=['{{QUERY}}<|extra_0|>'],
+        chat_sep=['<|eos|><|startoftext|>'],
+        suffix=['<|eos|>'],
+    ))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.hunyuan,
+        prefix=['<｜hy_begin▁of▁sentence｜>'],
+        system_prefix=['<｜hy_begin▁of▁sentence｜>{{SYSTEM}}<｜hy_place▁holder▁no▁3｜>'],
+        prompt=['<｜hy_User｜>{{QUERY}}<｜hy_Assistant｜>'],
+        chat_sep=['<｜hy_place▁holder▁no▁2｜>'],
+        suffix=['<｜hy_place▁holder▁no▁2｜>'],
+        template_cls=ThinkingWithAnswerTemplate,
+        agent_template='hunyuan_hermes'))

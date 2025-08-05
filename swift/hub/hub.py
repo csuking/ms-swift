@@ -1,4 +1,5 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
@@ -11,11 +12,11 @@ from huggingface_hub import RepoUrl
 from huggingface_hub.hf_api import api, future_compatible
 from requests.exceptions import HTTPError
 from transformers import trainer
-from transformers.utils import logging, strtobool
+from transformers.utils import strtobool
 
-from swift.utils.env import use_hf_hub
+from swift.utils import get_logger, ms_logger_context, use_hf_hub
 
-logger = logging.get_logger(__name__)
+logger = get_logger()
 
 
 class HubOperation:
@@ -55,7 +56,7 @@ class HubOperation:
                     path_in_repo: Optional[str] = None,
                     commit_message: Optional[str] = None,
                     commit_description: Optional[str] = None,
-                    token: Union[str, bool, None] = None,
+                    token: Optional[Union[str, bool]] = None,
                     private: bool = False,
                     revision: Optional[str] = 'master',
                     ignore_patterns: Optional[Union[List[str], str]] = None,
@@ -123,7 +124,11 @@ class MSHub(HubOperation):
     ms_token = None
 
     @staticmethod
-    def create_repo(repo_id: str, *, token: Union[str, bool, None] = None, private: bool = False, **kwargs) -> RepoUrl:
+    def create_repo(repo_id: str,
+                    *,
+                    token: Optional[Union[str, bool]] = None,
+                    private: bool = False,
+                    **kwargs) -> RepoUrl:
         """
         Create a new repository on the hub.
 
@@ -149,7 +154,7 @@ class MSHub(HubOperation):
         path_in_repo: Optional[str] = None,
         commit_message: Optional[str] = None,
         commit_description: Optional[str] = None,
-        token: Union[str, bool, None] = None,
+        token: Optional[Union[str, bool]] = None,
         revision: Optional[str] = 'master',
         ignore_patterns: Optional[Union[List[str], str]] = None,
         **kwargs,
@@ -241,7 +246,7 @@ class MSHub(HubOperation):
                     path_in_repo: Optional[str] = None,
                     commit_message: Optional[str] = None,
                     commit_description: Optional[str] = None,
-                    token: Union[str, bool, None] = None,
+                    token: Optional[Union[str, bool]] = None,
                     private: bool = False,
                     revision: Optional[str] = 'master',
                     ignore_patterns: Optional[Union[List[str], str]] = None,
@@ -287,15 +292,15 @@ class MSHub(HubOperation):
         cls.try_login(token)
         if revision is None or revision == 'main':
             revision = 'master'
-
-        return MsDataset.load(
-            dataset_id,
-            subset_name=subset_name,
-            split=split,
-            version=revision,
-            download_mode=download_mode,
-            use_streaming=streaming,
-        )
+        with ms_logger_context(logging.ERROR):
+            return MsDataset.load(
+                dataset_id,
+                subset_name=subset_name,
+                split=split,
+                version=revision,
+                download_mode=download_mode,
+                use_streaming=streaming,
+            )
 
     @classmethod
     def download_model(cls,
@@ -386,7 +391,7 @@ class HFHub(HubOperation):
                     path_in_repo: Optional[str] = None,
                     commit_message: Optional[str] = None,
                     commit_description: Optional[str] = None,
-                    token: Union[str, bool, None] = None,
+                    token: Optional[Union[str, bool]] = None,
                     private: bool = False,
                     revision: Optional[str] = 'master',
                     ignore_patterns: Optional[Union[List[str], str]] = None,

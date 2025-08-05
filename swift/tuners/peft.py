@@ -86,6 +86,17 @@ class LoraConfig(peft.LoraConfig):
 
 
 def _create_and_replace_hook(self, peft_config, adapter_name, target, *args, **kwargs):
+    all_supported_names = ('linear', )
+    all_supported_types = (torch.nn.Embedding, torch.nn.Conv2d, transformers.pytorch_utils.Conv1D, lora.Linear)
+    target_modules = getattr(peft_config, 'target_modules', None)
+    if target is None:
+        return
+
+    if isinstance(target_modules, str) and not any(
+        [name in target.__class__.__name__.lower()
+         for name in all_supported_names]) and not any([isinstance(target, type_) for type_ in all_supported_types]):
+        return
+
     if target.__class__.__name__ == 'NonDynamicallyQuantizableLinear':
         return
 
@@ -259,15 +270,16 @@ def adalora_mask_to_budget(self, model, budget):
 
 def keep_device_forward(self, *args, **kwargs):
     x = args[0]
-    if self.weight.device != x.device:
-        return self.forward_origin(x.to(self.weight.device), *args[1:], **kwargs)
+    weight = self.weight if hasattr(self, 'weight') else self.weight0  # compat megatron
+    if weight.device != x.device:
+        return self.forward_origin(x.to(weight.device), *args[1:], **kwargs)
     else:
         return self.forward_origin(*args, **kwargs)
 
 
 def hot_patch_peft_module():
     from peft.tuners.lora import LoraLayer
-    if hasattr('LoraModel', '_create_and_replace_origin'):
+    if hasattr(LoraModel, '_create_and_replace_origin'):
         return
 
     # Fix Lora does not support NonDynamicallyQuantizableLinear

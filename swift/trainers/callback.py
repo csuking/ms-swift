@@ -1,4 +1,5 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import math
 import os
 import time
 
@@ -6,11 +7,12 @@ from tqdm import tqdm
 from transformers import trainer
 from transformers.trainer_callback import (DefaultFlowCallback, PrinterCallback, ProgressCallback, TrainerControl,
                                            TrainerState)
-from transformers.trainer_utils import IntervalStrategy, has_length, speed_metrics
+from transformers.trainer_utils import IntervalStrategy, has_length
 
-from swift.utils import append_to_jsonl, is_pai_training_job, use_torchacc
-from ..utils.utils import format_time
+from swift.utils import append_to_jsonl, format_time, get_logger, is_pai_training_job
 from .arguments import TrainingArguments
+
+logger = get_logger()
 
 
 def add_train_message(logs, state, start_time) -> None:
@@ -33,11 +35,6 @@ class ProgressCallbackNew(ProgressCallback):
             self.training_bar = tqdm(desc='Train', total=state.max_steps, dynamic_ncols=True)
         self.current_step = 0
         self.start_time = time.time()
-        if use_torchacc():
-            self.warmup_start_time = 0
-            self.warmup_metric = None
-            self.metric_warmup_step = int(args.metric_warmup_step
-                                          * state.max_steps) if args.metric_warmup_step < 1 else args.metric_warmup_step
 
     def on_prediction_step(self, args, state: TrainerState, control, eval_dataloader=None, **kwargs):
         if state.is_world_process_zero and has_length(eval_dataloader):
@@ -49,23 +46,6 @@ class ProgressCallbackNew(ProgressCallback):
             self.prediction_bar.update()
 
     def on_log(self, args: TrainingArguments, state: TrainerState, control, logs=None, **kwargs):
-
-        if use_torchacc():
-            if state.global_step >= self.metric_warmup_step and self.warmup_start_time == 0:
-                self.warmup_start_time = time.time()
-                self.metric_warmup_step = state.global_step
-            if state.max_steps == state.global_step and self.warmup_metric is None:
-                num_steps = state.max_steps - self.metric_warmup_step
-                num_total_samples = args.train_dataset_sample
-                num_after_warmup_samples = int(num_total_samples / state.max_steps * num_steps)
-                self.warmup_metric = speed_metrics('warmup_train', self.warmup_start_time, num_after_warmup_samples,
-                                                   num_steps)
-                self.warmup_metric['num_total_samples'] = num_total_samples
-                self.warmup_metric['num_after_warmup_samples'] = num_after_warmup_samples
-            if 'train_samples_per_second' in logs:
-                logs.update(self.warmup_metric)
-                state.log_history[-1] = logs
-
         add_train_message(logs, state, self.start_time)
         if not is_pai_training_job() and state.is_world_process_zero:
             jsonl_path = os.path.join(args.output_dir, 'logging.jsonl')
@@ -86,6 +66,18 @@ class DefaultFlowCallbackNew(DefaultFlowCallback):
                 control.should_evaluate = True
             if args.save_strategy != IntervalStrategy.NO:
                 control.should_save = True
+        return control
+
+    def on_epoch_end(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs):
+        control = super().on_epoch_end(args, state, control, **kwargs)
+        evaluation_strategy = args.eval_strategy if hasattr(args, 'eval_strategy') else args.evaluation_strategy
+        if args.max_epochs is not None and args.max_epochs <= math.ceil(state.epoch):
+            logger.info('Training has reached `max_epochs`. The model will be saved and the training will be exited.')
+            if evaluation_strategy != IntervalStrategy.NO:
+                control.should_evaluate = True
+            if args.save_strategy != IntervalStrategy.NO:
+                control.should_save = True
+            control.should_training_stop = True
         return control
 
 

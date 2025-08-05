@@ -8,7 +8,7 @@ import torch.nn as nn
 from tqdm import tqdm
 
 from swift.llm import (ExportArguments, HfConfigFactory, MaxLengthError, ProcessorMixin, deep_getattr, get_model_arch,
-                       is_moe_model, load_dataset, prepare_model_template, save_checkpoint, to_device)
+                       load_dataset, prepare_model_template, save_checkpoint, to_device)
 from swift.utils import get_logger, get_model_parameter_info
 
 logger = get_logger()
@@ -31,7 +31,7 @@ class QuantEngine(ProcessorMixin):
 
     def quantize(self):
         args = self.args
-        if args.quant_bits is None:
+        if args.quant_bits is None and args.quant_method != 'fp8':
             raise ValueError(f'Please set the quant_bits. args.quant_bits: {args.quant_bits}')
         if args.quant_method == 'awq':
             self.template.model = self.model.model
@@ -46,7 +46,7 @@ class QuantEngine(ProcessorMixin):
                 args.output_dir,
                 safe_serialization=args.safe_serialization,
                 max_shard_size=args.max_shard_size)
-        elif args.quant_method == 'bnb':
+        elif args.quant_method in {'bnb', 'fp8'}:
             self.model.save_pretrained(
                 args.output_dir, safe_serialization=args.safe_serialization, max_shard_size=args.max_shard_size)
         else:
@@ -106,10 +106,11 @@ class QuantEngine(ProcessorMixin):
             prog_bar.update()
             if i == n_samples:
                 break
+        prog_bar.close()
         if is_multimodal and args.quant_method == 'gptq':
             return samples
         # now concatenate all samples and split according to block size
-        n_split = len(samples) // block_size
+        n_split = max(len(samples) // block_size, 1)
         logger.info(f'Split into {n_split} blocks')
         res = []
         for i in range(n_split):
@@ -150,13 +151,19 @@ class QuantEngine(ProcessorMixin):
             'w_bit': args.quant_bits,
             'version': 'GEMM'
         }
+        if self.model.model_info.is_moe_model:
+            quant_config['modules_to_not_convert'] = self.args.get_modules_to_not_convert()
+        logger.info(f'quant_config: {quant_config}')
         logger.info('Start quantizing the model...')
         with self._patch_awq_move_embed(self.model):
             self.model.quantize(
                 self.tokenizer, quant_config=quant_config, n_parallel_calib_samples=args.quant_batch_size)
         quantizer.get_calib_dataset = _origin_get_calib_dataset  # recover
-        self.model.model.config.quantization_config = AwqConfig(
-            bits=args.quant_bits, group_size=args.group_size, zero_point=True, version='GEMM')
+        if self.model.quant_config.modules_to_not_convert:
+            model_arch = get_model_arch(args.model_meta.model_arch)
+            lm_head_key = getattr(model_arch, 'lm_head', None) or 'lm_head'
+            if lm_head_key not in self.model.quant_config.modules_to_not_convert:
+                self.model.quant_config.modules_to_not_convert.append(lm_head_key)
 
     @contextmanager
     def _patch_gptq(self):
@@ -197,7 +204,7 @@ class QuantEngine(ProcessorMixin):
 
     @staticmethod
     def get_modules_in_block_to_quantize(model, block_name: str):
-        if not is_moe_model(model):
+        if not model.model_info.is_moe_model:
             return
         from optimum.gptq.utils import get_layers
         # Do not quantize the gate part.
@@ -224,6 +231,9 @@ class QuantEngine(ProcessorMixin):
         args = self.args
         logger.info(f'Quantization dataset: {args.dataset}')
         block_name_to_quantize = self.get_block_name_to_quantize(self.model)
+        modules_in_block_to_quantize = self.get_modules_in_block_to_quantize(self.model, block_name_to_quantize)
+        logger.info(f'block_name_to_quantize: {block_name_to_quantize}')
+        logger.info(f'modules_in_block_to_quantize: {modules_in_block_to_quantize}')
         with self._patch_gptq():
             gptq_quantizer = GPTQQuantizer(
                 bits=args.quant_bits,
@@ -231,7 +241,7 @@ class QuantEngine(ProcessorMixin):
                 dataset=','.join(args.dataset),
                 batch_size=args.quant_batch_size,
                 block_name_to_quantize=block_name_to_quantize,
-                modules_in_block_to_quantize=self.get_modules_in_block_to_quantize(self.model, block_name_to_quantize))
+                modules_in_block_to_quantize=modules_in_block_to_quantize)
             gptq_quantizer.serialization_keys.append('block_name_to_quantize')
             logger.info('Start quantizing the model...')
             logger.warning('The process of packing the model takes a long time and there is no progress bar. '

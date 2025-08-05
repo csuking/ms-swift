@@ -1,6 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import collections
 import os.path
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -11,8 +12,7 @@ import psutil
 from packaging import version
 
 from swift.ui.base import BaseUI
-from swift.utils import get_logger
-from swift.utils.utils import format_time
+from swift.utils import format_time, get_logger
 
 logger = get_logger()
 
@@ -61,8 +61,8 @@ class Runtime(BaseUI):
                 'en': 'Logging content'
             },
             'info': {
-                'zh': '如果日志无更新请再次点击"展示日志内容"',
-                'en': 'Please press "Show log" if the log content is not updating'
+                'zh': '如果日志无更新请再次点击"展示部署状态"',
+                'en': 'Please press "Show running status" if the log content is not updating'
             }
         },
         'running_tasks': {
@@ -93,7 +93,7 @@ class Runtime(BaseUI):
     def do_build_ui(cls, base_tab: Type['BaseUI']):
         with gr.Accordion(elem_id='runtime_tab', open=False, visible=True):
             with gr.Blocks():
-                with gr.Row():
+                with gr.Row(equal_height=True):
                     gr.Dropdown(elem_id='running_tasks', scale=10, allow_custom_value=True)
                     gr.Button(elem_id='refresh_tasks', scale=1, variant='primary')
                     gr.Button(elem_id='show_log', scale=1, variant='primary')
@@ -138,7 +138,7 @@ class Runtime(BaseUI):
         cls.log_event[log_file] = False
         offset = 0
         latest_data = ''
-        lines = collections.deque(maxlen=int(os.environ.get('MAX_LOG_LINES', 50)))
+        lines = collections.deque(maxlen=int(os.environ.get('MAX_LOG_LINES', 100)))
         try:
             with open(log_file, 'r', encoding='utf-8') as input:
                 input.seek(offset)
@@ -250,10 +250,14 @@ class Runtime(BaseUI):
             pid, all_args = cls.parse_info_from_cmdline(task)
             log_file = all_args['log_file']
             if sys.platform == 'win32':
-                os.system(f'taskkill /f /t /pid "{pid}"')
+                command = ['taskkill', '/f', '/t', '/pid', pid]
             else:
-                os.system(f'pkill -9 -f {log_file}')
-            time.sleep(1)
+                command = ['pkill', '-9', '-f', log_file]
+            try:
+                result = subprocess.run(command, capture_output=True, text=True)
+                assert result.returncode == 0
+            except Exception as e:
+                raise e
             cls.break_log_event(task)
         return [cls.refresh_tasks()] + [gr.update(value=None)]
 

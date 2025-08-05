@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, TypeVar, Union
 import torch
 from accelerate.utils import find_device
 from modelscope.hub.utils.utils import get_cache_dir
+from torch import nn
 from transformers import PretrainedConfig
 
 from swift.hub import get_hub
@@ -20,10 +21,6 @@ _T = TypeVar('_T')
 
 
 class AttnImpl:
-    flash_attn = 'flash_attn'
-    sdpa = 'sdpa'
-    eager = 'eager'
-
     attn_impl_keys = ['_attn_implementation', 'attn_implementation', 'llm_attn_implementation']
     use_flash_attn_keys = ['_flash_attn_2_enabled', 'use_flash_attn', '_use_flash_attention_2']
 
@@ -31,7 +28,7 @@ class AttnImpl:
     def to_use_flash_attn(attn_impl: Optional[str], auto_value: _T = None) -> Union[bool, _T]:
         if attn_impl is None:
             return auto_value
-        return attn_impl == AttnImpl.flash_attn
+        return attn_impl in {'flash_attn', 'flash_attention_2'}
 
     @staticmethod
     def update_attn_impl(config: PretrainedConfig,
@@ -39,6 +36,7 @@ class AttnImpl:
                          attn_impl_keys: Optional[List[str]] = None) -> None:
         if attn_impl is None:
             return
+        logger.info(f'attn_impl: {attn_impl}')
         use_flash_attn = AttnImpl.to_use_flash_attn(attn_impl)
         if use_flash_attn:
             attn_impl = 'flash_attention_2'
@@ -62,6 +60,7 @@ class ModelInfo:
 
     # extra
     rope_scaling: Optional[Dict[str, Any]] = None
+    is_moe_model: bool = False
     config: Optional[PretrainedConfig] = None
     task_type: Literal['causal_lm', 'seq_cls', 'embedding', None] = None
     num_labels: Optional[int] = None
@@ -98,9 +97,8 @@ class HfConfigFactory:
         else:
             return []
 
-        value = deep_getattr(config, attr_name, None)
-        if value is not None and parent_key in [None, 'language_config', 'llm_config', 'text_config']:
-            res.append((config, value))
+        if attr_name in keys and parent_key in [None, 'language_config', 'llm_config', 'text_config']:
+            res.append((config, deep_getattr(config, attr_name)))
 
         for k in keys:
             if k.endswith('_config'):
@@ -110,6 +108,15 @@ class HfConfigFactory:
                     v = getattr(config, k)
                 res += HfConfigFactory._get_config_attrs(v, attr_name, k)
         return res
+
+    @staticmethod
+    def is_moe_model(config) -> bool:
+        if 'Moe' in config.__class__.__name__:
+            return True
+        for key in ['num_experts', 'num_experts_per_tok', 'moe_intermediate_size']:
+            if HfConfigFactory.get_config_attr(config, key):
+                return True
+        return False
 
     @staticmethod
     def get_config_attr(config: Union[PretrainedConfig, Dict[str, Any]], attr_name: str) -> Optional[Any]:
@@ -168,6 +175,26 @@ class HfConfigFactory:
         return max_model_len
 
     @staticmethod
+    def set_max_model_len(config: Union[PretrainedConfig, Dict[str, Any]], value: int):
+        """Set the max length supported by the model"""
+
+        possible_keys = [
+            'seq_length',  # qwen, chatglm
+            'max_position_embeddings',  # qwen1.5, llama2
+            'n_positions',  # polylm, phi-2
+            'model_max_length',  # baichuan2
+            # others
+            'seq_len',
+            'max_seq_len',
+            'max_sequence_length',
+            'max_seq_length',
+        ]
+        for key in possible_keys:
+            max_len_value = HfConfigFactory.get_config_attr(config, key)
+            if max_len_value is not None:
+                HfConfigFactory.set_config_attr(config, key, value)
+
+    @staticmethod
     def compat_zero3(config: PretrainedConfig) -> None:
         value = HfConfigFactory.get_config_attr(config, 'hidden_size')
         try:
@@ -215,7 +242,8 @@ class HfConfigFactory:
         elif quant_method == 'hqq':
             res['quant_method'] = quant_method
             res['quant_bits'] = quantization_config['quant_config']['weight_quant_params']['nbits']
-
+        elif quant_method is not None:
+            res['quant_method'] = quant_method
         return res or None
 
 
@@ -283,6 +311,7 @@ def safe_snapshot_download(model_id_or_path: str,
 
 
 def git_clone_github(github_url: str,
+                     *,
                      local_repo_name: Optional[str] = None,
                      branch: Optional[str] = None,
                      commit_hash: Optional[str] = None) -> str:
@@ -293,27 +322,53 @@ def git_clone_github(github_url: str,
     if local_repo_name is None:
         github_url = github_url.rstrip('/')
         local_repo_name = github_url.rsplit('/', 1)[1]
+    github_url = f'{github_url}.git'
     local_repo_path = os.path.join(git_cache_dir, local_repo_name)
     with safe_ddp_context(hash_id=local_repo_path):
-        if not os.path.exists(local_repo_path):
-            github_url = f'{github_url}.git'
+        repo_existed = os.path.exists(local_repo_path)
+        if repo_existed:
+            command = ['git', '-C', local_repo_path, 'fetch']
+            subprocess_run(command)
+            if branch is not None:
+                command = ['git', '-C', local_repo_path, 'checkout', branch]
+                subprocess_run(command)
+        else:
             command = ['git', '-C', git_cache_dir, 'clone', github_url, local_repo_name]
-            command_str = f"git -C '{git_cache_dir}' clone '{github_url}' {local_repo_name}"
             if branch is not None:
                 command += ['--branch', branch]
-                command_str += f' --branch {branch}'
-            logger.info(f'Run the command: `{command_str}`')
             subprocess_run(command)
 
-            if commit_hash is not None:
-                git_cache_path = os.path.join(git_cache_dir, local_repo_name)
-                command = ['git', '-C', git_cache_path, 'reset', '--hard', commit_hash]
-                command_str = f"git -C '{git_cache_path}' reset '--hard' {commit_hash}"
-                logger.info(f'Run the command: `{command_str}`')
-                subprocess_run(command)
-
-        logger.info(f'local_repo_path: {local_repo_path}')
+        if commit_hash is not None:
+            command = ['git', '-C', local_repo_path, 'reset', '--hard', commit_hash]
+            subprocess_run(command)
+        elif repo_existed:
+            command = ['git', '-C', local_repo_path, 'pull']
+            subprocess_run(command)
+    logger.info(f'local_repo_path: {local_repo_path}')
     return local_repo_path
+
+
+def get_llm_model(model: torch.nn.Module, model_meta=None):
+    from swift import SwiftModel
+    from peft import PeftModel
+    from swift.llm import get_model_arch
+    from accelerate.utils import extract_model_from_parallel
+    model = extract_model_from_parallel(model)
+
+    if isinstance(model, (SwiftModel, PeftModel)):
+        model = model.model
+    if model_meta is None:
+        model_meta = model.model_meta
+
+    llm_prefix = getattr(get_model_arch(model_meta.model_arch), 'language_model', None)
+    if llm_prefix:
+        llm_model = deep_getattr(model, llm_prefix[0])
+    else:
+        llm_model = model
+
+    if 'CausalLM' not in llm_model.__class__.__name__:
+        llm_model = model
+    return llm_model
 
 
 def use_submodel_func(model, submodel_name: str, func_list: Optional[List[str]] = None) -> None:
@@ -347,3 +402,103 @@ def use_submodel_func(model, submodel_name: str, func_list: Optional[List[str]] 
             submodel.__class__.device = model.device
         if key == 'forward' and 'generate' in func_list:
             setattr(submodel, key, MethodType(_get_new_func(key), submodel))  # fix device_map
+
+
+class InitModelStrategy:
+
+    @staticmethod
+    def is_uninitialized(param: torch.Tensor) -> bool:
+        """
+        Check if a parameter is uninitialized or has numerically unstable values.
+        Criteria:
+            - Tensor has NaN or Inf values
+            - Tensor stats (mean or std) are outside reasonable range
+        """
+        if param.numel() == 0:
+            return False
+
+        with torch.no_grad():
+            mean_abs = param.abs().mean()
+            std = param.std()
+
+            # NaN or Inf
+            if not torch.isfinite(mean_abs) or not torch.isfinite(std):
+                return True
+
+            # Use empirically safe threshold
+            MAX_THRESHOLD = 1e7
+            if mean_abs > MAX_THRESHOLD or std > MAX_THRESHOLD:
+                return True
+
+            return False
+
+    @staticmethod
+    def constant_init(param: torch.Tensor, c: float = 0) -> None:
+        nn.init.constant_(param, c)
+
+    @staticmethod
+    def uniform_init(param: torch.Tensor, a: float = -0.1, b: float = 0.1) -> None:
+        nn.init.uniform_(param, a, b)
+
+    @staticmethod
+    def normal_init(param: torch.Tensor, mean: float = 0.0, std: float = 0.01) -> None:
+        nn.init.normal_(param, mean, std)
+
+    @staticmethod
+    def _init_high_dim(param: torch.Tensor, init_func, *args, **kwargs) -> None:
+        """Helper for high-dimensional initialization methods."""
+        if param.dim() > 1:
+            init_func(param, *args, **kwargs)
+        elif param.dim() == 1 and param.size(0) > 0:
+            InitModelStrategy.constant_init(param)
+
+    @staticmethod
+    def xavier_uniform_init(param: torch.Tensor) -> None:
+        InitModelStrategy._init_high_dim(param, nn.init.xavier_uniform_)
+
+    @staticmethod
+    def xavier_normal_init(param: torch.Tensor) -> None:
+        InitModelStrategy._init_high_dim(param, nn.init.xavier_normal_)
+
+    @staticmethod
+    def kaiming_uniform_init(param: torch.Tensor) -> None:
+        InitModelStrategy._init_high_dim(
+            param, nn.init.kaiming_uniform_, mode='fan_out', nonlinearity='leaky_relu', a=0.1)
+
+    @staticmethod
+    def kaiming_normal_init(param: torch.Tensor) -> None:
+        InitModelStrategy._init_high_dim(param, nn.init.kaiming_normal_, mode='fan_in', nonlinearity='relu')
+
+    @staticmethod
+    def orthogonal_init(param: torch.Tensor) -> None:
+        nn.init.orthogonal_(param, gain=1.0)
+
+    _INIT_STRATEGY_MAP = {
+        'zero': constant_init,
+        'uniform': uniform_init,
+        'normal': normal_init,
+        'xavier_uniform': xavier_uniform_init,
+        'xavier_normal': xavier_normal_init,
+        'kaiming_uniform': kaiming_uniform_init,
+        'kaiming_normal': kaiming_normal_init,
+        'orthogona': orthogonal_init,
+    }
+
+    @staticmethod
+    def init_parameters(model: nn.Module, init_strategy: str) -> None:
+        """Initialize model parameters using the specified strategy.
+        Args:
+            model: The model whose parameters to initialize
+            init_strategy: Name of initialization strategy
+        """
+        if init_strategy not in InitModelStrategy._INIT_STRATEGY_MAP:
+            raise ValueError(f'Unknown initialization strategy: {init_strategy}')
+
+        logger.info(f'initialization strategy: {init_strategy}')
+
+        init_func = InitModelStrategy._INIT_STRATEGY_MAP[init_strategy]
+
+        for name, param in model.named_parameters():
+            if InitModelStrategy.is_uninitialized(param):
+                logger.info(f'Initializing parameters: {name}.')
+                init_func(param)

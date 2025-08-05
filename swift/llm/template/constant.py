@@ -12,6 +12,10 @@ class LLMTemplateType:
     qwen2_5 = 'qwen2_5'
     qwen2_5_math = 'qwen2_5_math'
     qwen2_5_math_prm = 'qwen2_5_math_prm'
+    qwen3 = 'qwen3'
+    qwen3_thinking = 'qwen3_thinking'
+    qwen3_emb = 'qwen3_emb'
+    qwen3_reranker = 'qwen3_reranker'
     qwq_preview = 'qwq_preview'
     qwq = 'qwq'
     marco_o1 = 'marco_o1'
@@ -26,6 +30,7 @@ class LLMTemplateType:
     sus = 'sus'
 
     minimax = 'minimax'
+    minimax_m1 = 'minimax_m1'
     minimax_vl = 'minimax_vl'
 
     numina = 'numina'
@@ -35,8 +40,9 @@ class LLMTemplateType:
 
     chatglm2 = 'chatglm2'
     glm4 = 'glm4'
-    glm4_z1 = 'glm4_z1'
+    glm4_0414 = 'glm4_0414'
     glm4_z1_rumination = 'glm4_z1_rumination'
+    glm4_5 = 'glm4_5'
     codegeex4 = 'codegeex4'
     longwriter_llama = 'longwriter_llama'
 
@@ -65,6 +71,7 @@ class LLMTemplateType:
 
     mistral_nemo = 'mistral_nemo'
     mistral_2501 = 'mistral_2501'
+    devstral = 'devstral'
     zephyr = 'zephyr'
     wizardlm2 = 'wizardlm2'
     wizardlm2_moe = 'wizardlm2_moe'
@@ -79,10 +86,17 @@ class LLMTemplateType:
     bluelm = 'bluelm'
     orion = 'orion'
     moonlight = 'moonlight'
+    mimo_rl = 'mimo_rl'
+    dots1 = 'dots1'
+    hunyuan_moe = 'hunyuan_moe'
+    hunyuan = 'hunyuan'
+    ernie = 'ernie'
 
     aya = 'aya'
     c4ai = 'c4ai'
     dbrx = 'dbrx'
+
+    bert = 'bert'
 
 
 class RMTemplateType:
@@ -101,6 +115,7 @@ class MLLMTemplateType:
     ovis1_6 = 'ovis1_6'
     ovis1_6_llama3 = 'ovis1_6_llama3'
     ovis2 = 'ovis2'
+    mimo_vl = 'mimo_vl'
 
     llama3_1_omni = 'llama3_1_omni'
     llama3_2_vision = 'llama3_2_vision'
@@ -141,6 +156,7 @@ class MLLMTemplateType:
     cogvlm2 = 'cogvlm2'
     cogvlm2_video = 'cogvlm2_video'
     glm4v = 'glm4v'
+    glm4_1v = 'glm4_1v'
     glm_edge_v = 'glm_edge_v'
 
     minicpmv = 'minicpmv'
@@ -165,6 +181,7 @@ class MLLMTemplateType:
     got_ocr2_hf = 'got_ocr2_hf'
     step_audio = 'step_audio'
     kimi_vl = 'kimi_vl'
+    keye_vl = 'keye_vl'
 
     idefics3 = 'idefics3'
     pixtral = 'pixtral'
@@ -176,6 +193,7 @@ class MLLMTemplateType:
     megrez_omni = 'megrez_omni'
     valley = 'valley'
     gemma3_vision = 'gemma3_vision'
+    gemma3n = 'gemma3n'
     mistral_2503 = 'mistral_2503'
 
 

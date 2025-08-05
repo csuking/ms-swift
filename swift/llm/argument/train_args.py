@@ -10,7 +10,7 @@ from swift.plugin import LOSS_MAPPING
 from swift.trainers import TrainerFactory
 from swift.trainers.arguments import TrainArgumentsMixin
 from swift.utils import (add_version_to_work_dir, get_device_count, get_logger, get_pai_tensorboard_dir, is_master,
-                         is_mp, is_pai_training_job, is_swanlab_available)
+                         is_mp, is_pai_training_job, is_swanlab_available, json_parse_to_dict)
 from .base_args import BaseArguments, to_abspath
 from .tuner_args import TunerArguments
 
@@ -23,6 +23,8 @@ class Seq2SeqTrainingOverrideArguments(TrainArgumentsMixin, Seq2SeqTrainingArgum
     output_dir: Optional[str] = None
     learning_rate: Optional[float] = None
     eval_strategy: Optional[str] = None  # steps, epoch
+    fp16: Optional[bool] = None
+    bf16: Optional[bool] = None
 
     def _init_output_dir(self):
         if self.output_dir is None:
@@ -34,8 +36,9 @@ class Seq2SeqTrainingOverrideArguments(TrainArgumentsMixin, Seq2SeqTrainingArgum
             self.eval_strategy = self.save_strategy
         if self.eval_strategy == 'no':
             self.eval_steps = None
-            self.split_dataset_ratio = 0.
-            logger.info(f'Setting args.split_dataset_ratio: {self.split_dataset_ratio}')
+            if self.split_dataset_ratio > 0:
+                self.split_dataset_ratio = 0.
+                logger.info(f'Setting args.split_dataset_ratio: {self.split_dataset_ratio}')
         elif self.eval_strategy == 'steps' and self.eval_steps is None:
             self.eval_steps = self.save_steps
         self.evaluation_strategy = self.eval_strategy
@@ -65,6 +68,8 @@ class SwanlabArguments:
     swanlab_project: Optional[str] = None
     swanlab_workspace: Optional[str] = None
     swanlab_exp_name: Optional[str] = None
+    swanlab_lark_webhook_url: Optional[str] = None
+    swanlab_lark_secret: Optional[str] = None
     swanlab_mode: Literal['cloud', 'local'] = 'cloud'
 
     def _init_swanlab(self):
@@ -77,6 +82,15 @@ class SwanlabArguments:
         from swanlab.integration.transformers import SwanLabCallback
         if self.swanlab_token:
             swanlab.login(self.swanlab_token)
+
+        if self.swanlab_lark_webhook_url is not None:
+            from swanlab.plugin.notification import LarkCallback
+            lark_callback = LarkCallback(
+                webhook_url=self.swanlab_lark_webhook_url,
+                secret=self.swanlab_lark_secret,
+            )
+            swanlab.register_callbacks([lark_callback])
+
         INTEGRATION_TO_CALLBACK['swanlab'] = SwanLabCallback(
             project=self.swanlab_project,
             workspace=self.swanlab_workspace,
@@ -87,33 +101,24 @@ class SwanlabArguments:
 
 
 @dataclass
-class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideArguments, BaseArguments):
+class TrainArguments(SwanlabArguments, TunerArguments, BaseArguments, Seq2SeqTrainingOverrideArguments):
     """
     TrainArguments class is a dataclass that inherits from multiple argument classes:
     TunerArguments, Seq2SeqTrainingOverrideArguments, and BaseArguments.
 
     Args:
         add_version (bool): Flag to add version information to output_dir. Default is True.
-        resume_only_model (bool): Flag to resume training only the model. Default is False.
         loss_type (Optional[str]): Type of loss function to use. Default is None.
-        packing (bool): Flag to enable packing of datasets. Default is False.
-        lazy_tokenize (Optional[bool]): Flag to enable lazy tokenization. Default is None.
         max_new_tokens (int): Maximum number of new tokens to generate. Default is 64.
         temperature (float): Temperature for sampling. Default is 0.
         optimizer (Optional[str]): Optimizer type to use, define it in the plugin package. Default is None.
         metric (Optional[str]): Metric to use for evaluation, define it in the plugin package. Default is None.
     """
     add_version: bool = True
-    resume_only_model: bool = False
     create_checkpoint_symlink: bool = False
-
-    # dataset
-    packing: bool = False
-    lazy_tokenize: Optional[bool] = None
 
     # plugin
     loss_type: Optional[str] = field(default=None, metadata={'help': f'loss_func choices: {list(LOSS_MAPPING.keys())}'})
-    optimizer: Optional[str] = None
     metric: Optional[str] = None
 
     # extra
@@ -124,22 +129,27 @@ class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideAr
     # zero++
     zero_hpz_partition_size: Optional[int] = None
 
-    def _init_lazy_tokenize(self):
-        if self.streaming and self.lazy_tokenize:
-            self.lazy_tokenize = False
-            logger.warning('Streaming and lazy_tokenize are incompatible. '
-                           f'Setting args.lazy_tokenize: {self.lazy_tokenize}.')
-        if self.lazy_tokenize is None:
-            self.lazy_tokenize = self.model_meta.is_multimodal and not self.streaming
-            logger.info(f'Setting args.lazy_tokenize: {self.lazy_tokenize}')
+    # auto_tp
+    deepspeed_autotp_size: Optional[int] = None
 
     def __post_init__(self) -> None:
+        if self.padding_free or self.packing:
+            if self.packing:
+                feature = 'packing'
+                self.padding_free = False
+            else:
+                feature = 'padding_free'
+            if self.attn_impl not in {'flash_attn', 'flash_attention_2', 'flash_attention_3'}:
+                raise ValueError(f'The "{feature}" feature requires a flash attention implementation. '
+                                 'Please use one of: "flash_attn", "flash_attention_2", "flash_attention_3".')
         if self.resume_from_checkpoint:
             self.resume_from_checkpoint = to_abspath(self.resume_from_checkpoint, True)
-            if self.train_type == 'full':
-                self.model = self.resume_from_checkpoint
-            else:
-                self.adapters = [self.resume_from_checkpoint]
+            # The non-resume_only_model will have its weights loaded in the trainer.
+            if self.resume_only_model:
+                if self.train_type == 'full':
+                    self.model = self.resume_from_checkpoint
+                else:
+                    self.adapters = [self.resume_from_checkpoint]
         BaseArguments.__post_init__(self)
         Seq2SeqTrainingOverrideArguments.__post_init__(self)
         TunerArguments.__post_init__(self)
@@ -150,20 +160,21 @@ class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideAr
             elif self.use_galore:
                 self.optimizer = 'galore'
 
-        if len(self.dataset) == 0:
-            raise ValueError(f'self.dataset: {self.dataset}, Please input the training dataset.')
+        if len(self.dataset) == 0 and len(self.cached_dataset) == 0:
+            raise ValueError(f'self.dataset: {self.dataset}, self.cached_dataset: {self.cached_dataset}. '
+                             'Please input the training dataset.')
 
         self._handle_pai_compat()
 
         self._init_deepspeed()
         self._init_device()
-        self._init_lazy_tokenize()
 
         if getattr(self, 'accelerator_config', None) is None:
             self.accelerator_config = {'dispatch_batches': False}
+        if self.split_dataset_ratio == 0 and not self.val_dataset and not self.eval_dataset:
+            self.eval_strategy = 'no'
         self.training_args = TrainerFactory.get_training_args(self)
         self.training_args.remove_unused_columns = False
-
         self._add_version()
 
         if 'swanlab' in self.report_to:
@@ -187,12 +198,17 @@ class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideAr
                     self.deepspeed = os.path.join(ds_config_folder, ds_config)
                     break
 
-            self.deepspeed = self.parse_to_dict(self.deepspeed)
+            self.deepspeed = json_parse_to_dict(self.deepspeed)
             if self.zero_hpz_partition_size is not None:
                 assert 'zero_optimization' in self.deepspeed
                 self.deepspeed['zero_optimization']['zero_hpz_partition_size'] = self.zero_hpz_partition_size
                 logger.warn('If `zero_hpz_partition_size`(ZeRO++) causes grad_norm NaN, please'
                             ' try `--torch_dtype float16`')
+            if self.deepspeed_autotp_size is not None:
+                assert self.deepspeed is not None, (
+                    'To use `deepspeed_autotp_size`, you need to additionally set the `--deepspeed` argument.')
+                self.deepspeed['tensor_parallel'] = {'autotp_size': self.deepspeed_autotp_size}
+                self.deepspeed['zero_optimization']['gather_16bit_weights_on_model_save'] = True
             logger.info(f'Using deepspeed: {self.deepspeed}')
 
     def _handle_pai_compat(self) -> None:
@@ -220,6 +236,9 @@ class TrainArguments(SwanlabArguments, TunerArguments, Seq2SeqTrainingOverrideAr
         if is_master():
             os.makedirs(self.output_dir, exist_ok=True)
 
+        if self.run_name is None:
+            self.run_name = self.output_dir
+
         self.training_args.output_dir = self.output_dir
-        self.training_args.run_name = self.output_dir
+        self.training_args.run_name = self.run_name
         self.training_args.logging_dir = self.logging_dir

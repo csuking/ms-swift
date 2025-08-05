@@ -15,19 +15,22 @@ def use_hf_hub():
     return strtobool(os.environ.get('USE_HF', '0'))
 
 
+def get_hf_endpoint():
+    hf_endpoint = os.environ.get('HF_ENDPOINT', 'https://huggingface.co/')
+    if hf_endpoint.endswith('/'):
+        hf_endpoint = hf_endpoint[:-1]
+    return hf_endpoint
+
+
 def is_deepspeed_enabled():
     return strtobool(os.environ.get('ACCELERATE_USE_DEEPSPEED', '0'))
-
-
-def use_torchacc() -> bool:
-    return strtobool(os.getenv('USE_TORCHACC', '0'))
 
 
 def get_dist_setting() -> Tuple[int, int, int, int]:
     """return rank, local_rank, world_size, local_world_size"""
     rank = int(os.getenv('RANK', -1))
     local_rank = int(os.getenv('LOCAL_RANK', -1))
-    world_size = int(os.getenv('WORLD_SIZE', 1))
+    world_size = int(os.getenv('WORLD_SIZE') or os.getenv('_PATCH_WORLD_SIZE') or 1)
     # compat deepspeed launch
     local_world_size = int(os.getenv('LOCAL_WORLD_SIZE', None) or os.getenv('LOCAL_SIZE', 1))
     return rank, local_rank, world_size, local_world_size
@@ -49,23 +52,14 @@ def is_master():
     return rank in {-1, 0}
 
 
-def torchacc_trim_graph():
-    return strtobool(os.getenv('TORCHACC_TRIM_GRAPH', '0'))
-
-
 def is_dist():
     """Determine if the training is distributed"""
-    if use_torchacc():
-        return False
     rank, local_rank, _, _ = get_dist_setting()
     return rank >= 0 and local_rank >= 0
 
 
 def is_mp() -> bool:
-    if use_torchacc():
-        return False
-    if strtobool(os.environ.get('USE_FAST_INFERENCE', 'false')):
-        return False
+
     from swift.utils import get_device_count
     n_gpu = get_device_count()
     local_world_size = get_dist_setting()[3]
@@ -76,24 +70,11 @@ def is_mp() -> bool:
 
 
 def is_mp_ddp() -> bool:
-    # patch_mp_ddp will occur when `import swift`.
-    if is_dist() and is_mp():
-        logger.info('Using MP(device_map) + DDP')
+    _, _, world_size, _ = get_dist_setting()
+    if is_dist() and is_mp() and world_size > 1:
+        logger.info_once('Using MP(device_map) + DDP')
         return True
     return False
-
-
-def is_dist_ta() -> bool:
-    """Determine if the TorchAcc training is distributed"""
-    _, _, world_size, _ = get_dist_setting()
-    if use_torchacc() and world_size > 1:
-        if not dist.is_initialized():
-            import torchacc as ta
-            # Initialize in advance
-            dist.init_process_group(backend=ta.dist.BACKEND_NAME)
-        return True
-    else:
-        return False
 
 
 def is_pai_training_job() -> bool:

@@ -1,7 +1,7 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 from contextlib import nullcontext
-from typing import List, Union
+from typing import List, Optional, Union
 
 from evalscope.constants import EvalBackend, EvalType
 from evalscope.run import TaskConfig, run_task
@@ -102,7 +102,9 @@ class SwiftEval(SwiftPipeline):
             work_dir=work_dir,
             limit=args.eval_limit,
             eval_batch_size=args.eval_num_proc,
-            dataset_args=args.dataset_args)
+            dataset_args=args.dataset_args,
+            generation_config=args.eval_generation_config,
+            **args.extra_eval_args)
 
     def get_opencompass_task_cfg(self, dataset: List[str], url: str):
         args = self.args
@@ -140,6 +142,7 @@ class SwiftEval(SwiftPipeline):
                     'name': 'CustomAPIModel',
                     'api_base': url,
                     'key': args.api_key or 'EMPTY',
+                    **args.eval_generation_config
                 }],
                 'nproc':
                 args.eval_num_proc,
@@ -149,5 +152,5 @@ class SwiftEval(SwiftPipeline):
             work_dir=work_dir)
 
 
-def eval_main(args: Union[List[str], EvalArguments, None] = None):
+def eval_main(args: Optional[Union[List[str], EvalArguments]] = None):
     return SwiftEval(args).main()

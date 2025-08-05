@@ -10,7 +10,7 @@ from swift.llm import Processor, Template, get_model_tokenizer, get_template, lo
 from swift.llm.utils import get_ckpt_dir
 from swift.plugin import extra_tuners
 from swift.utils import (check_json_format, get_dist_setting, get_logger, import_external_file, is_dist, is_master,
-                         set_device, use_hf_hub)
+                         json_parse_to_dict, set_device, use_hf_hub)
 from .data_args import DataArguments
 from .generation_args import GenerationArguments
 from .model_args import ModelArguments
@@ -27,9 +27,7 @@ def get_supported_tuners():
 
 @dataclass
 class CompatArguments:
-    #
     ckpt_dir: Optional[str] = None
-    load_dataset_config: Optional[bool] = None
     lora_modules: List[str] = field(default_factory=list)
 
     def _handle_ckpt_dir(self: 'BaseArguments'):
@@ -43,8 +41,6 @@ class CompatArguments:
         else:
             self.model = self.ckpt_dir
         self.ckpt_dir = None
-        logger.warning('The `--ckpt_dir` parameter will be removed in `ms-swift>=3.4`. '
-                       'Please use `--model`, `--adapters`.')
 
     def __post_init__(self: 'BaseArguments'):
         if self.ckpt_dir is not None:
@@ -52,8 +48,6 @@ class CompatArguments:
 
         if len(self.lora_modules) > 0:
             self.adapters += self.lora_modules
-            logger.warning('The `--lora_modules` parameter will be removed in `ms-swift>=3.4`. '
-                           'Please use `--adapters`.')
 
 
 @dataclass
@@ -69,6 +63,8 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
         seed (int): Random seed for reproducibility. Default is 42.
         model_kwargs (Optional[str]): Additional keyword arguments for the model. Default is None.
         load_data_args (bool): Flag to determine if dataset configuration should be loaded. Default is False.
+        packing (bool): Flag to enable packing of datasets. Default is False.
+        lazy_tokenize (Optional[bool]): Flag to enable lazy tokenization. Default is None.
         use_hf (bool): Flag to determine if Hugging Face should be used. Default is False.
         hub_token (Optional[str]): SDK token for authentication. Default is None.
         custom_register_path (List[str]): Path to custom .py file for dataset registration. Default is None.
@@ -84,12 +80,19 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
     model_kwargs: Optional[Union[dict, str]] = None
     load_args: bool = True
     load_data_args: bool = False
-
+    # dataset
+    packing: bool = False
+    lazy_tokenize: Optional[bool] = None
+    cached_dataset: List[str] = field(default_factory=list)
+    custom_register_path: List[str] = field(default_factory=list)  # .py
+    # hub
     use_hf: bool = False
     # None: use env var `MODELSCOPE_API_TOKEN`
     hub_token: Optional[str] = field(
         default=None, metadata={'help': 'SDK token can be found in https://modelscope.cn/my/myaccesstoken'})
-    custom_register_path: List[str] = field(default_factory=list)  # .py
+    # dist
+    ddp_timeout: int = 18000000
+    ddp_backend: Optional[str] = None
 
     # extra
     ignore_args_error: bool = False  # True: notebook compatibility
@@ -97,6 +100,19 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
 
     def _prepare_training_args(self, training_args: Dict[str, Any]) -> None:
         pass
+
+    def _init_lazy_tokenize(self):
+        if self.lazy_tokenize is None:
+            if self.model_meta.is_multimodal and not self.streaming and not self.packing:
+                self.lazy_tokenize = True
+            else:
+                self.lazy_tokenize = False
+            logger.info(f'Setting args.lazy_tokenize: {self.lazy_tokenize}')
+        if self.lazy_tokenize:
+            if self.packing:
+                raise ValueError('Packing and lazy_tokenize are incompatible.')
+            if self.streaming:
+                raise ValueError('Streaming and lazy_tokenize are incompatible.')
 
     def _init_custom_register(self) -> None:
         """Register custom .py file to datasets"""
@@ -142,6 +158,7 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
         self._init_custom_register()
         self._import_external_plugins()
         self._init_model_kwargs()
+        self._init_stream()
         # The Seq2SeqTrainingArguments has a property called world_size, which cannot be assigned a value.
         self.rank, self.local_rank, self.global_world_size, self.local_world_size = get_dist_setting()
         logger.info(f'rank: {self.rank}, local_rank: {self.local_rank}, '
@@ -154,14 +171,16 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
         QuantizeArguments.__post_init__(self)
         TemplateArguments.__post_init__(self)
         DataArguments.__post_init__(self)
-
+        if isinstance(self.cached_dataset, str):
+            self.cached_dataset = [self.cached_dataset]
+        self._init_lazy_tokenize()
         self.hub = get_hub(self.use_hf)
         if self.hub.try_login(self.hub_token):
             logger.info('hub login successful!')
 
     def _init_model_kwargs(self):
         """Prepare model kwargs and set them to the env"""
-        self.model_kwargs: Dict[str, Any] = self.parse_to_dict(self.model_kwargs)
+        self.model_kwargs: Dict[str, Any] = json_parse_to_dict(self.model_kwargs)
         for k, v in self.model_kwargs.items():
             k = k.upper()
             os.environ[k] = str(v)
@@ -193,45 +212,65 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
     def _init_ckpt_dir(self, adapters=None):
         # compat megatron
         model = self.model or getattr(self, 'mcore_model', None) or getattr(self, 'load', None)
-        self.ckpt_dir = get_ckpt_dir(model, adapters or self.adapters)
+        adapters = adapters or self.adapters or getattr(self, 'mcore_adapters', None)
+        self.ckpt_dir = get_ckpt_dir(model, adapters)
         if self.ckpt_dir and self.load_args:
             self.load_args_from_ckpt()
 
     def load_args_from_ckpt(self) -> None:
-        from ..train_args import TrainArguments
         args_path = os.path.join(self.ckpt_dir, 'args.json')
         assert os.path.exists(args_path), f'args_path: {args_path}'
         with open(args_path, 'r', encoding='utf-8') as f:
             old_args = json.load(f)
-        all_keys = list(f.name for f in fields(BaseArguments))
-        data_keys = list(f.name for f in fields(DataArguments))
-        load_keys = [
+        force_load_keys = [
+            # base_args
+            'train_type',
+            # model_args
+            'task_type',
             # quant_args
             'bnb_4bit_quant_type',
             'bnb_4bit_use_double_quant',
-            # base_args
-            'train_type',
-            'tuner_backend',
-            'use_swift_lora',
-            # data_args
-            'model_name',
-            'model_author',
-            'split_dataset_ratio',
-            # template_args
-            'tools_prompt',
-            'use_chat_template',
         ]
-        skip_keys = list(f.name for f in fields(GenerationArguments) + fields(CompatArguments)) + ['adapters']
-        if not isinstance(self, TrainArguments):
-            skip_keys += ['max_length']
-        all_keys = set(all_keys) - set(skip_keys)
+        # If the current value is None or an empty list and it is among the following keys
+        load_keys = [
+            'custom_register_path',
+            'external_plugins',
+            # model_args
+            'model',
+            'model_type',
+            'model_revision',
+            'torch_dtype',
+            'attn_impl',
+            'new_special_tokens',
+            'num_labels',
+            'problem_type',
+            'rope_scaling',
+            'max_model_len',
+            # quant_args
+            'quant_method',
+            'quant_bits',
+            'hqq_axis',
+            'bnb_4bit_compute_dtype',
+            # template_args
+            'template',
+            'system',
+            'truncation_strategy',
+            'agent_template',
+            'norm_bbox',
+            'use_chat_template',
+            'response_prefix',
+        ]
+        if 'megatron' in self.__class__.__name__.lower():
+            force_load_keys = []
+            load_keys.remove('use_chat_template')
+        data_keys = list(f.name for f in fields(DataArguments))
         for key, old_value in old_args.items():
-            if key not in all_keys or old_value is None:
+            if old_value is None:
                 continue
-            if not self.load_data_args and key in data_keys:
-                continue
+            if key in force_load_keys or self.load_data_args and key in data_keys:
+                setattr(self, key, old_value)
             value = getattr(self, key, None)
-            if value is None or isinstance(value, (list, tuple)) and len(value) == 0 or key in load_keys:
+            if key in load_keys and (value is None or isinstance(value, (list, tuple)) and len(value) == 0):
                 setattr(self, key, old_value)
         logger.info(f'Successfully loaded {args_path}.')
 
@@ -248,11 +287,10 @@ class BaseArguments(CompatArguments, GenerationArguments, QuantizeArguments, Dat
         if is_dist():
             set_device()
 
-    def get_template(self, processor: 'Processor', template_type: Optional[str] = None) -> 'Template':
+    def get_template(self, processor: Optional['Processor'], template_type: Optional[str] = None) -> 'Template':
         template_kwargs = self.get_template_kwargs()
         template_type = template_type or self.template
         template = get_template(template_type, processor, **template_kwargs)
-        logger.info(f'default_system: {template.template_meta.default_system}')
         return template
 
     def get_model_processor(self,
